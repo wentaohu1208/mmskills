@@ -1,0 +1,52 @@
+{
+  "name": "apply_highlight_to_selected_text",
+  "frame_range": [
+    6,
+    15
+  ],
+  "skill": {
+    "context": {
+      "goal": "Apply highlighting to the currently selected letter in the document title.",
+      "cues": "The letter 'a' in the title is selected with a pink highlight; the toolbar contains a Highlight button with a yellow marker icon.",
+      "cue_frame": 6,
+      "state": {
+        "mode": "select_text",
+        "precondition": [
+          "document_open",
+          "on_page_7",
+          "text_selected"
+        ],
+        "state_anchor": {
+          "appearance_frame": 6,
+          "bbox": [
+            0.412,
+            0.535,
+            0.427,
+            0.593
+          ],
+          "locator": "pink-selected letter 'a' in the title"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "highlight_button",
+        "appearance_frame": 6,
+        "bbox": [
+          0.478,
+          0.056,
+          0.505,
+          0.115
+        ],
+        "locator": "toolbar button labeled 'Highlight' with yellow marker icon"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(highlight_button)",
+        "expect": "The selected letter 'a' changes from pink selection to a green highlighted text mark.",
+        "expect_frame": 8
+      }
+    ]
+  }
+}

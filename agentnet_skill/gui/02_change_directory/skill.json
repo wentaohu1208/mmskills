@@ -1,0 +1,38 @@
+{
+  "name": "change_directory",
+  "frame_range": [
+    1,
+    2
+  ],
+  "skill": {
+    "context": {
+      "goal": "move the shell into the target project folder",
+      "cues": "A Terminal window is open with a fish prompt at the home directory and the command line is ready for a path change",
+      "cue_frame": 1,
+      "state": {
+        "mode": null,
+        "precondition": [
+          "terminal_open",
+          "shell_prompt_ready"
+        ],
+        "state_anchor": {
+          "appearance_frame": 1,
+          "locator": "fish /home/user prompt"
+        }
+      }
+    },
+    "anchors": [],
+    "procedure": [
+      {
+        "action": "type(\"cd <target_project_folder>\")",
+        "from_frame": 1,
+        "raw": "pyautogui.write(message='cd ~/Desktop/pp')"
+      },
+      {
+        "action": "press(enter)",
+        "from_frame": 2,
+        "raw": "pyautogui.press('enter')"
+      }
+    ]
+  }
+}

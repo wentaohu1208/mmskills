@@ -1,0 +1,101 @@
+{
+  "name": "set_inserted_text_font_size",
+  "frame_range": [
+    0,
+    11
+  ],
+  "skill": {
+    "context": {
+      "goal": "Open the inserted text object's properties, change its font size to 13, and apply the change.",
+      "cues": "TLAEditor PDF editing window is open on page 1/15 in InsertText mode. A text object/letter on the page is highlighted in green, and the Text properties dialog appears after interacting with it. The dialog contains fields for text, drawing mode, font, font size, fill color, and an Apply button.",
+      "cue_frame": 0,
+      "state": {
+        "mode": "insert_text",
+        "precondition": [
+          "pdf_open",
+          "on_page_1",
+          "insert_text_mode",
+          "text_object_selected"
+        ],
+        "state_anchor": {
+          "appearance_frame": 0,
+          "bbox": [
+            0.408,
+            0.978,
+            0.568,
+            0.994
+          ],
+          "locator": "bottom status bar text: 'InsertText mode : click on pdf to insert a text'"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "selected_text_object",
+        "appearance_frame": 0,
+        "bbox": [
+          0.366,
+          0.782,
+          0.574,
+          0.871
+        ],
+        "locator": "green-highlighted letter/text on PDF page near 'Marketing Basics'"
+      },
+      {
+        "role": "font_size_dropdown",
+        "appearance_frame": 1,
+        "bbox": [
+          0.489,
+          0.706,
+          0.69,
+          0.734
+        ],
+        "locator": "Text properties dialog > Font size combo box"
+      },
+      {
+        "role": "font_size_option_13",
+        "appearance_frame": 7,
+        "bbox": [
+          0.489,
+          0.795,
+          0.678,
+          0.817
+        ],
+        "locator": "Font size dropdown option '13'"
+      },
+      {
+        "role": "apply_button",
+        "appearance_frame": 9,
+        "bbox": [
+          0.489,
+          0.897,
+          0.597,
+          0.933
+        ],
+        "locator": "Text properties dialog Apply button"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(selected_text_object)",
+        "expect": "The Text properties dialog opens over the PDF page.",
+        "expect_frame": 1
+      },
+      {
+        "action": "click(font_size_dropdown)",
+        "expect": "The font size dropdown list expands, showing available sizes.",
+        "expect_frame": 4
+      },
+      {
+        "action": "click(font_size_option_13)",
+        "expect": "The dropdown closes and the Font size field displays 13.",
+        "expect_frame": 8
+      },
+      {
+        "action": "click(apply_button)",
+        "expect": "The Text properties dialog closes, returning to the PDF view with the selected text object still visible.",
+        "expect_frame": 11
+      }
+    ]
+  }
+}

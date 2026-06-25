@@ -1,0 +1,67 @@
+{
+  "name": "export_selected_text_to_notepad",
+  "frame_range": [
+    0,
+    15
+  ],
+  "skill": {
+    "context": {
+      "goal": "Export the currently selected PDF text into a plain text Notepad window.",
+      "cues": "TIAEditor window showing a PDF page titled 'UNDERSTANDING MARKETING'; multiple text blocks are highlighted in magenta, toolbar is visible with an 'Export to text' button, and the page indicator shows 4/15.",
+      "cue_frame": 0,
+      "state": {
+        "mode": "select_text",
+        "precondition": [
+          "text_selected",
+          "on_page_4"
+        ],
+        "state_anchor": {
+          "appearance_frame": 0,
+          "bbox": [
+            0.315,
+            0.298,
+            0.704,
+            0.833
+          ],
+          "locator": "magenta-highlighted selected text on the PDF page"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "export_to_text_button",
+        "appearance_frame": 0,
+        "bbox": [
+          0.583,
+          0.056,
+          0.63,
+          0.115
+        ],
+        "locator": "toolbar button labeled 'Export to text' with document icon"
+      },
+      {
+        "role": "ok_button",
+        "appearance_frame": 5,
+        "bbox": [
+          0.496,
+          0.497,
+          0.531,
+          0.522
+        ],
+        "locator": "OK button in the small export dialog"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(export_to_text_button)",
+        "expect": "A small export confirmation/options dialog appears over the selected PDF text.",
+        "expect_frame": 5
+      },
+      {
+        "action": "click(ok_button)",
+        "expect": "A Notepad window opens in the upper-left containing the exported selected text as plain text.",
+        "expect_frame": 10
+      }
+    ]
+  }
+}

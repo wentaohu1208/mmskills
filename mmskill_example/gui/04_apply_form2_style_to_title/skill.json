@@ -1,0 +1,51 @@
+{
+  "name": "apply_form2_style_to_title",
+  "frame_range": [
+    0,
+    15
+  ],
+  "skill": {
+    "context": {
+      "goal": "Apply the predefined 'form2' style to the document title paragraph.",
+      "cues": "ONLYOFFICE PDF/document editor is open on the Home tab with a form document visible; the insertion caret is at the end of the title text 'Estimate of Auto Repairs', and the style gallery is visible in the ribbon.",
+      "cue_frame": 0,
+      "state": {
+        "mode": "editing",
+        "precondition": [
+          "home_tab_open",
+          "cursor_in_title_paragraph"
+        ],
+        "state_anchor": {
+          "appearance_frame": 0,
+          "bbox": [
+            0.229,
+            0.294,
+            0.397,
+            0.326
+          ],
+          "locator": "insertion caret at end of title text 'Estimate of Auto Repairs'"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "form2_style_button",
+        "appearance_frame": 0,
+        "bbox": [
+          0.629,
+          0.124,
+          0.708,
+          0.181
+        ],
+        "locator": "Home ribbon style gallery item labeled 'form2'"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(form2_style_button)",
+        "expect": "The title paragraph is formatted with the form2 style: centered bold title inside a wide gray bordered header band near the top of the form.",
+        "expect_frame": 10
+      }
+    ]
+  }
+}

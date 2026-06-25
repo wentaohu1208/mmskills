@@ -1,0 +1,52 @@
+{
+  "name": "select_title_character",
+  "frame_range": [
+    2,
+    6
+  ],
+  "skill": {
+    "context": {
+      "goal": "Select a single character in the title text on the page so it can be edited or deleted.",
+      "cues": "The editor is in text selection mode, showing the expanded text toolbar and the title text 'arketing Basics' centered on the page.",
+      "cue_frame": 2,
+      "state": {
+        "mode": "select_text",
+        "precondition": [
+          "document_open",
+          "on_page_1",
+          "text_selection_mode_active"
+        ],
+        "state_anchor": {
+          "appearance_frame": 2,
+          "bbox": [
+            0.425,
+            0.907,
+            0.605,
+            0.922
+          ],
+          "locator": "bottom status text 'Select text mode : Click and drag to select a text'"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "target_character_in_title",
+        "appearance_frame": 3,
+        "bbox": [
+          0.424,
+          0.501,
+          0.438,
+          0.552
+        ],
+        "locator": "the character near the start of the centered title text, around the 'r' in 'arketing Basics'"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "drag_over(target_character_in_title)",
+        "expect": "The target character in the title is highlighted with a red text selection rectangle.",
+        "expect_frame": 6
+      }
+    ]
+  }
+}

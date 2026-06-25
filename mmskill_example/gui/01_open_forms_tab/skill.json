@@ -1,0 +1,51 @@
+{
+  "name": "open_forms_tab",
+  "frame_range": [
+    0,
+    2
+  ],
+  "skill": {
+    "context": {
+      "goal": "Switch the editor ribbon to the Forms tools so form fields can be inserted.",
+      "cues": "ONLYOFFICE document editor is open on Document2.pdf with the Home ribbon visible and a simple numbered list on the page.",
+      "cue_frame": 0,
+      "state": {
+        "mode": "insert_text",
+        "precondition": [
+          "document_open",
+          "home_tab_active"
+        ],
+        "state_anchor": {
+          "appearance_frame": 0,
+          "bbox": [
+            0.04,
+            0.1,
+            0.08,
+            0.135
+          ],
+          "locator": "Home tab highlighted on the top ribbon"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "forms_tab",
+        "appearance_frame": 0,
+        "bbox": [
+          0.256,
+          0.101,
+          0.3,
+          0.139
+        ],
+        "locator": "top ribbon tab labeled 'Forms'"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(forms_tab)",
+        "expect": "Forms tab becomes active and the ribbon changes to form controls such as Text Field, Combo Box, Dropdown, Checkbox, Radio Button, and Image.",
+        "expect_frame": 2
+      }
+    ]
+  }
+}

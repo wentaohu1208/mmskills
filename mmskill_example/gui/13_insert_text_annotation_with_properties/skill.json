@@ -1,0 +1,83 @@
+{
+  "name": "insert_text_annotation_with_properties",
+  "frame_range": [
+    0,
+    15
+  ],
+  "skill": {
+    "context": {
+      "goal": "Insert a text annotation onto the current PDF slide using the Text properties dialog.",
+      "cues": "TJAEditor document viewer is open on slide page 4/15 titled 'UNDERSTANDING MARKETING'. InsertText mode is active, and the Text properties dialog appears after clicking the page. The dialog contains a 'Text to insert' field and an Apply button.",
+      "cue_frame": 0,
+      "state": {
+        "mode": "insert_text",
+        "precondition": [
+          "on_page_4",
+          "insert_text_mode_active"
+        ],
+        "state_anchor": {
+          "appearance_frame": 0,
+          "bbox": [
+            0.432,
+            0.946,
+            0.608,
+            0.974
+          ],
+          "locator": "bottom status bar text 'InsertText mode : click on pdf to insert a text'"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "pdf_insert_location",
+        "appearance_frame": 0,
+        "bbox": [
+          0.52,
+          0.43,
+          0.54,
+          0.46
+        ],
+        "locator": "target point on the visible PDF page where the text annotation should be inserted"
+      },
+      {
+        "role": "text_to_insert_field",
+        "appearance_frame": 1,
+        "bbox": [
+          0.467,
+          0.449,
+          0.604,
+          0.475
+        ],
+        "locator": "Text properties dialog input field labeled 'Text to insert'"
+      },
+      {
+        "role": "apply_button",
+        "appearance_frame": 1,
+        "bbox": [
+          0.467,
+          0.648,
+          0.539,
+          0.672
+        ],
+        "locator": "Text properties dialog 'Apply' button"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(pdf_insert_location)",
+        "expect": "Text properties dialog opens over the PDF page.",
+        "expect_frame": 1
+      },
+      {
+        "action": "input(text_to_insert_field,<text>)",
+        "expect": "The typed text appears in the 'Text to insert' field with the caret after it.",
+        "expect_frame": 9
+      },
+      {
+        "action": "click(apply_button)",
+        "expect": "Apply action is triggered; the cursor shows a busy indicator while the text insertion is being processed.",
+        "expect_frame": 13
+      }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "navigate_to_page_3",
+  "frame_range": [
+    0,
+    4
+  ],
+  "skill": {
+    "context": {
+      "goal": "Move from the first page of the opened document to page 3 using the page navigation controls.",
+      "cues": "TIAEditor document viewer in view-only/view mode, centered PDF-like page, top display manipulation bar shows page indicator '1 / 9' and green navigation arrow buttons.",
+      "cue_frame": 0,
+      "state": {
+        "mode": "view_only",
+        "precondition": [
+          "document_open",
+          "on_page_1"
+        ],
+        "state_anchor": {
+          "appearance_frame": 0,
+          "bbox": [
+            0.373,
+            0.16,
+            0.619,
+            0.184
+          ],
+          "locator": "top page indicator showing '1 / 9'"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "next_page_button",
+        "appearance_frame": 0,
+        "bbox": [
+          0.622,
+          0.16,
+          0.638,
+          0.184
+        ],
+        "locator": "green right-arrow button immediately to the right of the page number field"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(next_page_button)",
+        "expect": "Document advances from page 1 toward the next page; the page indicator increments.",
+        "expect_frame": 1
+      },
+      {
+        "action": "click(next_page_button)",
+        "expect": "Document is on page 3 and the page indicator shows '3 / 9'.",
+        "expect_frame": 4
+      }
+    ]
+  }
+}

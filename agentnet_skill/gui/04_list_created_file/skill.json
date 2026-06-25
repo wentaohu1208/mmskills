@@ -1,0 +1,38 @@
+{
+  "name": "list_created_file",
+  "frame_range": [
+    7,
+    8
+  ],
+  "skill": {
+    "context": {
+      "goal": "verify the newly created file exists and inspect its details",
+      "cues": "The terminal remains in the same target directory and the user types an ls -l command for the file name",
+      "cue_frame": 7,
+      "state": {
+        "mode": null,
+        "precondition": [
+          "shell_in_target_directory",
+          "file_created"
+        ],
+        "state_anchor": {
+          "appearance_frame": 7,
+          "locator": "fish /home/user/Desktop/pp prompt"
+        }
+      }
+    },
+    "anchors": [],
+    "procedure": [
+      {
+        "action": "type(\"ls -l <file>\")",
+        "from_frame": 7,
+        "raw": "pyautogui.write(message='ls -l goast.out')"
+      },
+      {
+        "action": "press(enter)",
+        "from_frame": 8,
+        "raw": "pyautogui.press('enter')"
+      }
+    ]
+  }
+}

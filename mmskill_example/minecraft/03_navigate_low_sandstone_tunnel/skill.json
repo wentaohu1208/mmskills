@@ -1,0 +1,71 @@
+{
+  "name": "navigate_low_sandstone_tunnel",
+  "frame_range": [
+    6,
+    9
+  ],
+  "skill": {
+    "context": {
+      "goal": "在低矮、昏暗的砂岩/石质通道中调整视角并沿可通行缝隙移动。",
+      "cues": "画面变暗，准星多次对准顶部或侧面的方块边缘，空间狭窄且有低矮顶板。",
+      "cue_frame": 6
+    },
+    "anchors": [
+      {
+        "role": "low_ceiling_block",
+        "appearance_frame": 6,
+        "bbox": [
+          0.239,
+          0.0,
+          0.871,
+          0.728
+        ],
+        "locator": "帧6画面中央上方深色方块顶板，准星附近可见方块边线"
+      },
+      {
+        "role": "narrow_tunnel_gap",
+        "appearance_frame": 7,
+        "bbox": [
+          0.316,
+          0.152,
+          0.699,
+          0.755
+        ],
+        "locator": "帧7画面中央斜向的低矮通道缝隙，位于砂岩侧墙与暗色顶板之间"
+      },
+      {
+        "role": "floor_corner_path",
+        "appearance_frame": 8,
+        "bbox": [
+          0.392,
+          0.103,
+          0.737,
+          0.772
+        ],
+        "locator": "帧8准星附近的地面/墙角方块交界处，表示可继续沿角落移动的路径"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "look_up_and_align(low_ceiling_block)",
+        "expect": "准星对准低矮顶板方块，确认头顶障碍和通道高度。",
+        "expect_frame": 6
+      },
+      {
+        "action": "move_along(narrow_tunnel_gap)",
+        "expect": "视角贴近侧墙和顶板，玩家进入更狭窄的低矮通道。",
+        "expect_frame": 7
+      },
+      {
+        "action": "adjust_view_to(floor_corner_path)",
+        "expect": "准星转向地面墙角交界，玩家沿可通行路径继续前进。",
+        "expect_frame": 8
+      },
+      {
+        "action": "move_forward_through(floor_corner_path)",
+        "expect": "画面转为近距离浅色砂岩墙面，说明已通过该段低矮通道并靠近下一处空间。",
+        "expect_frame": 9
+      }
+    ]
+  }
+}

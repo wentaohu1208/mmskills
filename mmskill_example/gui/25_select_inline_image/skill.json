@@ -1,0 +1,51 @@
+{
+  "name": "select_inline_image",
+  "frame_range": [
+    0,
+    6
+  ],
+  "skill": {
+    "context": {
+      "goal": "Select the inline image embedded in the PDF page so image-specific actions become available.",
+      "cues": "TIAEditor window showing a PDF page with an embedded screenshot image in the center; the Images tool/tab is active and the bottom status says to click an inline image.",
+      "cue_frame": 0,
+      "state": {
+        "mode": "select_image",
+        "precondition": [
+          "pdf_open",
+          "inline_image_visible"
+        ],
+        "state_anchor": {
+          "appearance_frame": 0,
+          "bbox": [
+            0.405,
+            0.934,
+            0.62,
+            0.956
+          ],
+          "locator": "bottom status text: 'Select image mode: Click to select inline image'"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "inline_image",
+        "appearance_frame": 0,
+        "bbox": [
+          0.388,
+          0.41,
+          0.655,
+          0.804
+        ],
+        "locator": "embedded screenshot image in the middle of the PDF page"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(inline_image)",
+        "expect": "The embedded image is selected, shown with a thin selection border; bottom status changes to image-selected instructions.",
+        "expect_frame": 6
+      }
+    ]
+  }
+}

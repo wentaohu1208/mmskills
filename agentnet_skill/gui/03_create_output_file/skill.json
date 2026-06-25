@@ -1,0 +1,50 @@
+{
+  "name": "create_output_file",
+  "frame_range": [
+    3,
+    6
+  ],
+  "skill": {
+    "context": {
+      "goal": "create a new file placeholder in the current directory",
+      "cues": "The terminal prompt shows the target folder path and the user is typing a touch command for a filename",
+      "cue_frame": 3,
+      "state": {
+        "mode": null,
+        "precondition": [
+          "shell_in_target_directory",
+          "command_line_ready"
+        ],
+        "state_anchor": {
+          "appearance_frame": 3,
+          "locator": "fish /home/user/Desktop/pp prompt"
+        }
+      }
+    },
+    "anchors": [],
+    "procedure": [
+      {
+        "action": "type(\"touch <file>\")",
+        "from_frame": 5,
+        "raw": "pyautogui.write(message='touch goast.out')"
+      },
+      {
+        "action": "press(enter)",
+        "from_frame": 6,
+        "raw": "pyautogui.press('enter')"
+      }
+    ]
+  },
+  "dropped_steps": [
+    {
+      "action": "type(\"touch gost.out\")",
+      "from_frame": 3,
+      "raw": "pyautogui.write(message='touch gost.out')"
+    },
+    {
+      "action": "hotkey(ctrl+u)",
+      "from_frame": 4,
+      "raw": "pyautogui.hotkey(['ctrl', 'u'])"
+    }
+  ]
+}

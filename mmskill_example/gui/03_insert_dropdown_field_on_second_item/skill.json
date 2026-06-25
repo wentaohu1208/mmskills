@@ -1,0 +1,68 @@
+{
+  "name": "insert_dropdown_field_on_second_item",
+  "frame_range": [
+    10,
+    15
+  ],
+  "skill": {
+    "context": {
+      "goal": "Insert a dropdown form field next to the second numbered item.",
+      "cues": "Forms ribbon is active; a checkbox field is already placed after item '1.' and the cursor is positioned on item '2.'.",
+      "cue_frame": 10,
+      "state": {
+        "mode": "forms",
+        "precondition": [
+          "forms_tab_active",
+          "checkbox_inserted_on_item_1",
+          "cursor_on_item_2"
+        ],
+        "state_anchor": {
+          "appearance_frame": 10,
+          "bbox": [
+            0.287,
+            0.35,
+            0.309,
+            0.419
+          ],
+          "locator": "page area showing item '1.' with a checkbox and item '2.' with the text cursor"
+        }
+      }
+    },
+    "anchors": [
+      {
+        "role": "dropdown_button",
+        "appearance_frame": 10,
+        "bbox": [
+          0.122,
+          0.154,
+          0.163,
+          0.218
+        ],
+        "locator": "Forms ribbon button labeled 'Dropdown'"
+      },
+      {
+        "role": "second_item_dropdown_position",
+        "appearance_frame": 10,
+        "bbox": [
+          0.291,
+          0.397,
+          0.309,
+          0.419
+        ],
+        "locator": "insertion point immediately after numbered item '2.' on the page"
+      }
+    ],
+    "procedure": [
+      {
+        "action": "click(dropdown_button)",
+        "expect": "Dropdown field insertion is invoked from the Forms ribbon.",
+        "expect_frame": 13
+      },
+      {
+        "action": "click(second_item_dropdown_position)",
+        "expect": "A dropdown form field labeled 'Choose an item' appears next to item '2.' below the first checkbox.",
+        "expect_frame": 14
+      }
+    ]
+  }
+}
