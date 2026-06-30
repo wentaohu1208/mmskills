@@ -1,0 +1,152 @@
+[
+  {
+    "id": "gen-chrome-001",
+    "snapshot": "chrome",
+    "instruction": "Configure Chrome to block all third-party cookies for every website.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In chrome://settings cookies, 'Block third-party cookies' is selected.",
+    "est_steps": 4,
+    "difficulty": "easy",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-002",
+    "snapshot": "chrome",
+    "instruction": "Turn off Chrome's offer to save and autofill payment methods (credit cards).",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In Autofill > Payment methods, 'Save and fill payment methods' is toggled off.",
+    "est_steps": 4,
+    "difficulty": "easy",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-003",
+    "snapshot": "chrome",
+    "instruction": "Make Chrome always show the bookmarks bar on every page, not just the new tab page.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "The bookmarks bar is set to always visible (Appearance > Show bookmarks bar = on).",
+    "est_steps": 3,
+    "difficulty": "easy",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-004",
+    "snapshot": "chrome",
+    "instruction": "Set the default page zoom in Chrome to 125% for all websites.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In Appearance, default Page zoom is set to 125%.",
+    "est_steps": 3,
+    "difficulty": "easy",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-005",
+    "snapshot": "chrome",
+    "instruction": "Configure Chrome to ask where to save each file before downloading, instead of saving automatically.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In Downloads settings, 'Ask where to save each file before downloading' is on.",
+    "est_steps": 4,
+    "difficulty": "easy",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-006",
+    "snapshot": "chrome",
+    "instruction": "Stop Chrome from continuing to run background apps after all its windows are closed.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In System settings, 'Continue running background apps when Google Chrome is closed' is off.",
+    "est_steps": 4,
+    "difficulty": "medium",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-007",
+    "snapshot": "chrome",
+    "instruction": "Disable Chrome's offer to save and autofill street addresses.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In Autofill > Addresses and more, 'Save and fill addresses' is toggled off.",
+    "est_steps": 4,
+    "difficulty": "easy",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-008",
+    "snapshot": "chrome",
+    "instruction": "Turn on Chrome's option to offer translating pages that are in a language I don't read.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In Languages settings, 'Use Google Translate' / offer to translate is enabled.",
+    "est_steps": 4,
+    "difficulty": "medium",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-009",
+    "snapshot": "chrome",
+    "instruction": "Set Chrome so that websites are not allowed to use JavaScript by default.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In Site settings > JavaScript, 'Don't allow sites to use JavaScript' is selected.",
+    "est_steps": 4,
+    "difficulty": "medium",
+    "needs_file": false
+  },
+  {
+    "id": "gen-chrome-010",
+    "snapshot": "chrome",
+    "instruction": "Turn off Chrome's 'Preload pages for faster browsing and searching' setting.",
+    "source": "synthetic-handcraft-batch1",
+    "config": [
+      {"type": "launch", "parameters": {"command": ["google-chrome", "--remote-debugging-port=1337"]}},
+      {"type": "launch", "parameters": {"command": ["socat", "tcp-listen:9222,fork", "tcp:localhost:1337"]}}
+    ],
+    "related_apps": ["chrome"],
+    "success_nl": "In Performance/Privacy, 'Preload pages' is set to off / no preloading.",
+    "est_steps": 4,
+    "difficulty": "medium",
+    "needs_file": false
+  }
+]
