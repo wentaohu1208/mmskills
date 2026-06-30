@@ -42,6 +42,7 @@ class HindsightConfig:
     model: str
     temperature: float
     min_steps: int
+    reuse_path: Optional[str] = None
 
 
 # ---------- GPT-5.5 (vision) ----------
@@ -205,6 +206,8 @@ def main() -> None:
     parser.add_argument("--out", required=True, help="output peeu_tasks jsonl")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--min-steps", type=int, default=2)
+    parser.add_argument("--reuse-experiences", default=None,
+                        help="old peeu_tasks jsonl: reuse its saved experiences (skip M3, M4-only re-run)")
     args = parser.parse_args()
 
     if not os.environ.get("OPENAI_BASE_URL") or not os.environ.get("OPENAI_API_KEY"):
@@ -212,13 +215,31 @@ def main() -> None:
 
     cfg = HindsightConfig(traj_path=args.traj, out_path=args.out,
                           model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"),
-                          temperature=args.temperature, min_steps=args.min_steps)
+                          temperature=args.temperature, min_steps=args.min_steps,
+                          reuse_path=args.reuse_experiences)
 
     try:
         with open(cfg.traj_path, encoding="utf-8") as fh:
             trajs = [json.loads(l) for l in fh if l.strip()]
     except FileNotFoundError:
         raise SystemExit(f"trajectory file not found: {cfg.traj_path}")
+
+    # M4-only mode: reuse saved per-step experiences (mu) from a prior peeu_tasks file,
+    # keyed by trajectory_dir, so M3 (per-step vision) is skipped and only M4 re-runs.
+    reuse_mu: Dict[str, List[str]] = {}
+    if cfg.reuse_path:
+        try:
+            with open(cfg.reuse_path, encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    rec = json.loads(line)
+                    d, mu = rec.get("trajectory_dir"), rec.get("experiences")
+                    if d and isinstance(mu, list):
+                        reuse_mu[d] = [str(x) for x in mu]
+            logger.info("reuse-experiences: loaded %d cached mu from %s", len(reuse_mu), cfg.reuse_path)
+        except FileNotFoundError:
+            raise SystemExit(f"reuse-experiences file not found: {cfg.reuse_path}")
     clean: List[Dict[str, Any]] = []
     degenerate: List[Dict[str, Any]] = []
     for tj in trajs:
@@ -226,7 +247,7 @@ def main() -> None:
             logger.info("skip %s (only %d steps)", tj.get("goal", "")[:40], tj.get("n_steps", 0))
             continue
         try:
-            mu = m3_extract(tj, cfg)
+            mu = reuse_mu.get(tj["dir"]) or m3_extract(tj, cfg)
             actions = [s["action"] for s in tj["steps"]]
             d_tilde = m4_synthesize(tj["goal"], actions, mu, cfg)
         except Exception as e:  # one trajectory failure must not kill the batch
