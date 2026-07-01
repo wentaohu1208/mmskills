@@ -54,7 +54,15 @@ ROOT_CONFIG: Dict[str, List[Dict[str, Any]]] = {
         {"type": "launch", "parameters": {"command": ["code", "--disable-workspace-trust", "--new-window"]}},
         {"type": "activate_window", "parameters": {"window_name": "Visual Studio Code"}},
     ],
-    "gimp": [{"type": "launch", "parameters": {"command": ["gimp"]}}],
+    # gimp: seed a real photo ALREADY OPEN in GIMP so exploration MANIPULATES an image
+    # (crop/color/filter/export) instead of just selecting tools on an empty canvas. Image =
+    # an official OSWorld gimp-task input from the HF file cache (proven reachable from the VM).
+    "gimp": [
+        {"type": "download", "parameters": {"files": [{
+            "url": "https://huggingface.co/datasets/xlangai/ubuntu_osworld_file_cache/resolve/main/gimp/2a729ded-3296-423d-aec4-7dd55ed5fbb3/dog_with_background.png",
+            "path": "/home/user/Desktop/dog_with_background.png"}]}},
+        {"type": "launch", "parameters": {"command": ["gimp", "/home/user/Desktop/dog_with_background.png"]}},
+    ],
     "libreoffice_calc": [{"type": "launch", "parameters": {"command": ["libreoffice", "--calc"]}}],
     "libreoffice_writer": [{"type": "launch", "parameters": {"command": ["libreoffice", "--writer"]}}],
     "libreoffice_impress": [{"type": "launch", "parameters": {"command": ["libreoffice", "--impress"]}}],
@@ -85,10 +93,18 @@ CONTEXT_HINT: Dict[str, str] = {
                    "already open in LibreOffice Calc) and /home/user/Desktop/work/report.txt (a report "
                    "draft). Goals should COMBINE content across apps, e.g. chart the sales data and put "
                    "it into the report, or summarize the spreadsheet in Writer."),
+    "gimp": ("Seeded: the photo /home/user/Desktop/dog_with_background.png (a dog on a background) is "
+             "ALREADY OPEN in GIMP. Goals must MANIPULATE this image and produce a changed result "
+             "(crop/scale/rotate it, adjust brightness-contrast or hue-saturation, apply a filter, add a "
+             "text layer, or export/overwrite it as PNG/JPEG). Do NOT propose goals that only open a "
+             "menu, select a tool, or switch a view without changing the image."),
 }
 
 # Per-app exploration focus areas (drives M1 diversity); falls back to generic if absent.
 APP_FOCUS: Dict[str, List[str]] = {
+    "gimp": ["crop or resize the loaded image", "adjust brightness/contrast or hue/saturation",
+             "apply a filter (e.g. Gaussian blur or sharpen)", "add a text layer onto the image",
+             "rotate or flip the canvas", "export/overwrite the image as PNG or JPEG"],
     "libreoffice_calc": ["enter data into cells", "apply a formula", "format cells", "create a chart", "sort/filter a range"],
     "libreoffice_writer": ["type and format text", "apply styles/headings", "insert table or image", "page layout", "find and replace"],
     "libreoffice_impress": ["add a slide", "edit slide text", "apply a layout/theme", "insert shape or image", "slide transitions"],
