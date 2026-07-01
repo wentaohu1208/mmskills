@@ -181,8 +181,15 @@ def propose_goals(first_png: bytes, cfg: ExploreConfig) -> List[str]:
     ctx = (" " + CONTEXT_HINT[cfg.app]) if cfg.app in CONTEXT_HINT else ""
     system = (
         f"You look at the first screen of the Ubuntu app '{cfg.app}' and propose {cfg.n_goals} "
-        "diverse, concrete things a user could DO here (exploration goals), each achievable via the "
-        f"GUI in a few steps.{hint}{ctx} Return ONLY a JSON array of short goal strings."
+        "SUBSTANTIVE, multi-step tasks a user could accomplish here. Each task MUST create, modify, "
+        "transform, or complete something concrete, take roughly 4-8 GUI steps, and end in a "
+        "VERIFIABLE change (content produced/edited, a setting applied, a file saved or exported). "
+        "FORBIDDEN: tasks whose end state is merely opening a menu/panel/dialog, selecting a tool, or "
+        f"switching a view WITHOUT producing a result. Good examples (adapt the STYLE to '{cfg.app}'): "
+        "'Type a two-line note and save it as report.txt'; 'Sum column B and format the total as "
+        "currency'; 'Crop the image to a square and export it as PNG'. Bad examples (never produce "
+        "these): 'Open the File menu'; 'Select the Move tool'; 'Display the Playlist panel'."
+        f"{hint}{ctx} Return ONLY a JSON array of short task strings."
     )
     messages = [
         {"role": "system", "content": system},
