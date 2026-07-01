@@ -33,12 +33,12 @@ import json
 import logging
 import os
 import re
-import shutil
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from PIL import Image, ImageDraw
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -156,6 +156,47 @@ def _sanitize(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", name.strip().lower()).strip("_")[:60] or "skill"
 
 
+def _to_int(v: Any) -> Any:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return v
+
+
+_BOX_ANCHOR = (255, 0, 0)
+_BOX_CHANGE = (0, 180, 0)
+
+
+def _save_boxed(src_path: str, bbox: Optional[List[float]], dst_path: str,
+                color: Tuple[int, int, int]) -> bool:
+    """Save src frame to dst, drawing a colored box (normalized bbox) on it when bbox is given.
+
+    The coordinate is consumed to draw the visual mark and never stored in the skill JSON.
+    """
+    try:
+        im = Image.open(src_path).convert("RGB")
+    except (OSError, ValueError):
+        return False
+    if isinstance(bbox, list) and len(bbox) == 4:
+        w, h = im.size
+        pts = [bbox[0] * w, bbox[1] * h, (bbox[0] + bbox[2]) * w, (bbox[1] + bbox[3]) * h]
+        ImageDraw.Draw(im).rectangle(pts, outline=color, width=5)
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    im.save(dst_path)
+    return True
+
+
+def _apply_slots(text: Any, params: List[Dict[str, Any]]) -> Any:
+    """Replace each parameter's literal example value with its {name} slot (params pre-sorted longest-first)."""
+    if not isinstance(text, str):
+        return text
+    for p in params:
+        name, ex = p.get("name"), p.get("example")
+        if name and isinstance(ex, str) and len(ex) >= 2 and ex in text:
+            text = text.replace(ex, "{" + str(name) + "}")
+    return text
+
+
 # ---------- adapter: AgentNet record -> minimal trajectory ----------
 
 def find_images(img_dirs: Tuple[str, ...]) -> Dict[str, str]:
@@ -257,21 +298,29 @@ def enrich_traj(traj: Dict[str, Any], img_index: Dict[str, str], cfg: T2SConfig)
 DISTILL_SYS = (
     "You are given a TASK and an agent's step-by-step trajectory that accomplished it; each step lists "
     "{verb, value, target (the element acted on), effect (what changed)}. EXTRACT the reusable multimodal "
-    "SKILL(S) this trajectory demonstrates -- DISTILL, do not transcribe. ALL OUTPUT IN ENGLISH. Rules:\n"
-    "- A skill is a REUSABLE competence applicable to other similar tasks, NOT a replay of this run. Decide "
-    "how many skills this trajectory contains (usually 1, sometimes a few) and return each.\n"
-    "- MILD ABSTRACTION: keep the concrete procedure and its UI targets, but replace task-specific VALUES "
-    "(filenames, typed text, search terms, specific names) with {parameter} slots; list them in 'parameters'.\n"
-    "- Keep ONLY essential steps; DROP glue / navigation / backtracking. One step = one action; you MAY drop "
-    "steps. Each skill step MUST reference its 'source_step' index.\n"
-    "- Per step: needs_anchor (true if the target is a specific on-screen element that must be seen to locate, "
-    "e.g. an icon / menu item / small control; false for keyboard actions or obvious / unique / large targets); "
-    "needs_verify (true only for a meaningful, checkable state change) + a short 'verify_cue'.\n"
-    "- intent = the step's purpose; target = concise semantic description (NO coordinates).\n"
+    "SKILL(S) this trajectory demonstrates and CONDENSE each into a few high-level PHASES -- do NOT output "
+    "one phase per click. ALL OUTPUT IN ENGLISH. Rules:\n"
+    "- A skill is a REUSABLE competence applicable to other similar tasks, NOT a replay. Decide how many "
+    "skills this trajectory contains (usually 1, sometimes a few) and return each.\n"
+    "- GROUP consecutive atomic steps that serve ONE sub-goal into a single PHASE. A typical skill has 3-6 "
+    "phases (e.g. 'open the settings page', 'find the target setting', 'set its value'), NOT 15 clicks. Drop "
+    "glue / navigation / backtracking steps entirely.\n"
+    "- MILD ABSTRACTION: replace task-specific VALUES (filenames, typed text, search terms, specific names) "
+    "with {parameter} slots. USE the {slot} INSIDE each phase's 'action' and 'verify_cue' text -- never leave "
+    "a literal task-specific value there. List every slot in 'parameters' with an 'example'.\n"
+    "- Each phase has:\n"
+    "    name         : snake_case phase name\n"
+    "    trigger      : the whole-screen STATE at the START of this phase (a situation, not an element)\n"
+    "    action       : ONE coarse natural-language action for the whole phase (with {slots}), not a click\n"
+    "    source_steps : list of atomic step indices this phase covers\n"
+    "    anchor_step  : the ONE atomic step index whose click best represents this phase's key element "
+    "(null for keyboard-only phases with no on-screen target)\n"
+    "    verify_step  : the atomic step index whose result marks the phase done (usually the last one)\n"
+    "    verify_cue   : how to know the phase succeeded (with {slots})\n"
     'Return ONLY JSON {"skills":[{"name":"snake_case_verb_phrase","description":"...","domain":"gimp|chrome|'
     'libreoffice_calc|libreoffice_writer|libreoffice_impress|vlc|vs_code|thunderbird|os|multi_apps",'
-    '"preconditions":["..."],"parameters":[{"name":"...","example":"..."}],"steps":[{"source_step":0,'
-    '"intent":"...","target":"...","needs_anchor":true,"needs_verify":false,"verify_cue":""}]}]}'
+    '"preconditions":["..."],"parameters":[{"name":"...","example":"..."}],"phases":[{"name":"...",'
+    '"trigger":"...","action":"...","source_steps":[0,1],"anchor_step":1,"verify_step":1,"verify_cue":"..."}]}]}'
 )
 
 
@@ -284,61 +333,59 @@ def distill(task: str, enriched: List[Dict[str, Any]], cfg: T2SConfig) -> List[D
     obj = _extract_json(call_gpt([{"role": "system", "content": DISTILL_SYS},
                                   {"role": "user", "content": body}], cfg))
     skills = obj.get("skills", []) if isinstance(obj, dict) else []
-    return [s for s in skills if isinstance(s, dict) and s.get("steps")]
+    return [s for s in skills if isinstance(s, dict) and s.get("phases")]
 
 
 # ---------- assemble + write one skill folder ----------
 
 def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], img_index: Dict[str, str],
                 out_dir: str, seq: int, task_id: str) -> bool:
-    """Assemble one distilled skill into <seq>_<name>/{skill.json, frames/} and copy its referenced
-    full screenshots. Returns True if written, False if the skill had no usable step."""
+    """Assemble one distilled skill (phases) into <seq>_<name>/{skill.json, frames/}, drawing the anchor /
+    change boxes onto the saved screenshots (no numeric coordinates in the JSON). Returns True if written."""
     name = _sanitize(str(skill.get("name", "skill")))
     folder = os.path.join(out_dir, f"{seq:03d}_{name}")
     frames_dir = os.path.join(folder, "frames")
-    steps_out: List[Dict[str, Any]] = []
-    copies: List[Tuple[str, str]] = []
-    used_steps: List[Any] = []
-    for ss in skill.get("steps", []):
-        try:
-            key: Any = int(ss.get("source_step"))
-        except (TypeError, ValueError):
-            key = ss.get("source_step")
-        e = enr_by_idx.get(key)
-        if e is None:
-            logger.debug("drop step: unknown source_step %r (task %s)", ss.get("source_step"), task_id[:8])
-            continue
-        used_steps.append(key)
-        step: Dict[str, Any] = {
-            "intent": str(ss.get("intent", "")),
-            "action": {"verb": e["verb"], "target": str(ss.get("target") or e["target"]), "value": e["value"]},
+    params = [p for p in skill.get("parameters", []) if isinstance(p, dict)]
+    params.sort(key=lambda p: len(str(p.get("example", ""))), reverse=True)  # longest example first
+    phases_out: List[Dict[str, Any]] = []
+    for i, ph in enumerate(skill.get("phases", [])):
+        pnum = i + 1
+        phase: Dict[str, Any] = {
+            "name": _sanitize(str(ph.get("name", f"phase{pnum}"))),
+            "trigger": _apply_slots(str(ph.get("trigger", "")), params),
+            "action": _apply_slots(str(ph.get("action", "")), params),
         }
-        if ss.get("needs_anchor") and e["anchor_bbox"] and e["before_image"] in img_index:
-            fn = f"step{e['index']}_anchor.png"
-            step["visual_anchor"] = {"frame": f"frames/{fn}", "bbox_norm": e["anchor_bbox"]}
-            copies.append((img_index[e["before_image"]], os.path.join(frames_dir, fn)))
-        if ss.get("needs_verify") and ss.get("verify_cue"):
-            ver: Dict[str, Any] = {"cue": str(ss["verify_cue"])}
-            if e["after_image"] and e["after_image"] in img_index:
-                fn = f"step{e['index']}_after.png"
+        # anchor: draw the box onto the phase's representative before-frame; store no coordinate
+        ea = enr_by_idx.get(_to_int(ph.get("anchor_step")))
+        if ea and ea.get("anchor_bbox") and ea["before_image"] in img_index:
+            fn = f"phase{pnum}_anchor.png"
+            if _save_boxed(img_index[ea["before_image"]], ea["anchor_bbox"],
+                           os.path.join(frames_dir, fn), _BOX_ANCHOR):
+                phase["visual_anchor"] = {"frame": f"frames/{fn}",
+                                          "object": _apply_slots(str(ea.get("target", "")), params)}
+        # verification: cue + the phase's after-frame (change region boxed if localized)
+        ev = enr_by_idx.get(_to_int(ph.get("verify_step")))
+        ver: Dict[str, Any] = {"cue": _apply_slots(str(ph.get("verify_cue", "")), params)}
+        if ev and ev.get("after_image") and ev["after_image"] in img_index:
+            fn = f"phase{pnum}_after.png"
+            if _save_boxed(img_index[ev["after_image"]], ev.get("change_bbox"),
+                           os.path.join(frames_dir, fn), _BOX_CHANGE):
                 ver["frame"] = f"frames/{fn}"
-                ver["bbox_norm"] = e["change_bbox"]
-                copies.append((img_index[e["after_image"]], os.path.join(frames_dir, fn)))
-            step["verification"] = ver
-        steps_out.append(step)
-    if not steps_out:
+        if ver.get("cue") or ver.get("frame"):
+            phase["verification"] = ver
+        phases_out.append(phase)
+    if not phases_out:
         return False
-    os.makedirs(frames_dir, exist_ok=True)
-    for src, dst in copies:
-        shutil.copyfile(src, dst)
+    os.makedirs(folder, exist_ok=True)
     doc = {
         "name": name,
-        "description": str(skill.get("description", "")),
+        "description": _apply_slots(str(skill.get("description", "")), params),
         "domain": str(skill.get("domain", "")),
-        "preconditions": [str(p) for p in skill.get("preconditions", []) if isinstance(p, str)],
-        "parameters": [p for p in skill.get("parameters", []) if isinstance(p, dict)],
-        "steps": steps_out,
-        "provenance": {"dataset": "agentnet", "task_id": task_id, "source_steps": used_steps},
+        "preconditions": [_apply_slots(str(p), params) for p in skill.get("preconditions", []) if isinstance(p, str)],
+        "parameters": params,
+        "phases": phases_out,
+        "provenance": {"dataset": "agentnet", "task_id": task_id,
+                       "phase_source_steps": [ph.get("source_steps") for ph in skill.get("phases", [])]},
     }
     with open(os.path.join(folder, "skill.json"), "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
