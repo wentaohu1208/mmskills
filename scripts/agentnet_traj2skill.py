@@ -129,15 +129,17 @@ def parse_code(code: str) -> Dict[str, Any]:
     elif verb == "scroll":
         sm = re.search(rf"({_NUM})", args)
         value = sm.group(1) if sm else ""
-    xm = re.search(rf"x\s*=\s*({_NUM})", args)
-    ym = re.search(rf"y\s*=\s*({_NUM})", args)
-    if xm is None and ym is None and verb in _POINTER:
-        pos = re.findall(_NUM, args)
-        x = float(pos[0]) if len(pos) >= 2 else None
-        y = float(pos[1]) if len(pos) >= 2 else None
-    else:
-        x = float(xm.group(1)) if xm else None
-        y = float(ym.group(1)) if ym else None
+    x = y = None
+    if verb in _POINTER:  # coords only matter for pointer actions
+        xm = re.search(rf"x\s*=\s*({_NUM})", args)
+        ym = re.search(rf"y\s*=\s*({_NUM})", args)
+        if xm is None and ym is None:
+            pos = re.findall(_NUM, args)  # positional: click(0.018, 0.508)
+            x = float(pos[0]) if len(pos) >= 2 else None
+            y = float(pos[1]) if len(pos) >= 2 else None
+        else:
+            x = float(xm.group(1)) if xm else None
+            y = float(ym.group(1)) if ym else None
     return {"verb": verb, "value": value, "x": x, "y": y}
 
 
@@ -167,15 +169,20 @@ def find_images(img_dirs: Tuple[str, ...]) -> Dict[str, str]:
 
 
 def normalize(rec: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep ONLY {index, image, code} per step -- treat as a bare rollout."""
-    steps = [{"index": st.get("index"), "image": st.get("image", ""),
-              "code": st.get("value", {}).get("code", "")} for st in rec.get("traj", [])]
+    """Keep ONLY {index, image, code} per step -- treat as a bare rollout.
+
+    `index` is the enumerate position (0..n-1), not AgentNet's field, so the distiller's
+    source_step values map back reliably regardless of the source schema.
+    """
+    steps = [{"index": i, "image": st.get("image", ""),
+              "code": st.get("value", {}).get("code", "")} for i, st in enumerate(rec.get("traj", []))]
     return {"task_id": rec.get("task_id", ""),
             "task": rec.get("actual_task") or rec.get("natural_language_task") or rec.get("instruction", ""),
             "steps": steps}
 
 
 def select(cfg: T2SConfig, img_index: Dict[str, str]) -> List[Dict[str, Any]]:
+    """Pick up to `limit` completed, high-alignment trajectories (optionally all-frames-present)."""
     out: List[Dict[str, Any]] = []
     with open(cfg.in_path, encoding="utf-8") as fh:
         for line in fh:
@@ -210,6 +217,7 @@ ENRICH_SYS = (
 
 def enrich_step(before: Optional[bytes], after: Optional[bytes], pc: Dict[str, Any],
                 cfg: T2SConfig) -> Dict[str, Any]:
+    """MLLM+vision over (before, after, action) -> {target, effect, anchor_bbox, change_bbox}."""
     parts: List[Dict[str, Any]] = [{"type": "text", "text":
         f"ACTION: verb={pc['verb']} point=({pc['x']},{pc['y']}) value={pc['value']!r}\n(BEFORE, then AFTER)"}]
     if before:
@@ -225,6 +233,7 @@ def enrich_step(before: Optional[bytes], after: Optional[bytes], pc: Dict[str, A
 
 
 def enrich_traj(traj: Dict[str, Any], img_index: Dict[str, str], cfg: T2SConfig) -> List[Dict[str, Any]]:
+    """Enrich every step. before = step i's frame, after = step i+1's frame (last step: no after)."""
     steps = traj["steps"]
     enriched: List[Dict[str, Any]] = []
     for i, st in enumerate(steps):
@@ -267,6 +276,7 @@ DISTILL_SYS = (
 
 
 def distill(task: str, enriched: List[Dict[str, Any]], cfg: T2SConfig) -> List[Dict[str, Any]]:
+    """Text-only MLLM over task + enriched steps -> list of reusable skills (model decides count)."""
     lines = [f"[step {e['index']}] verb={e['verb']} value={e['value']!r} | target: {e['target'][:120]} "
              f"| effect: {e['effect'][:120]}" for e in enriched]
     body = (f"TASK: {task}\n\nTRAJECTORY ({len(enriched)} steps):\n" + "\n".join(lines)
@@ -281,11 +291,14 @@ def distill(task: str, enriched: List[Dict[str, Any]], cfg: T2SConfig) -> List[D
 
 def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], img_index: Dict[str, str],
                 out_dir: str, seq: int, task_id: str) -> bool:
+    """Assemble one distilled skill into <seq>_<name>/{skill.json, frames/} and copy its referenced
+    full screenshots. Returns True if written, False if the skill had no usable step."""
     name = _sanitize(str(skill.get("name", "skill")))
     folder = os.path.join(out_dir, f"{seq:03d}_{name}")
     frames_dir = os.path.join(folder, "frames")
     steps_out: List[Dict[str, Any]] = []
     copies: List[Tuple[str, str]] = []
+    used_steps: List[Any] = []
     for ss in skill.get("steps", []):
         try:
             key: Any = int(ss.get("source_step"))
@@ -295,6 +308,7 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
         if e is None:
             logger.debug("drop step: unknown source_step %r (task %s)", ss.get("source_step"), task_id[:8])
             continue
+        used_steps.append(key)
         step: Dict[str, Any] = {
             "intent": str(ss.get("intent", "")),
             "action": {"verb": e["verb"], "target": str(ss.get("target") or e["target"]), "value": e["value"]},
@@ -324,8 +338,7 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
         "preconditions": [str(p) for p in skill.get("preconditions", []) if isinstance(p, str)],
         "parameters": [p for p in skill.get("parameters", []) if isinstance(p, dict)],
         "steps": steps_out,
-        "provenance": {"dataset": "agentnet", "task_id": task_id,
-                       "source_steps": [ss.get("source_step") for ss in skill.get("steps", [])]},
+        "provenance": {"dataset": "agentnet", "task_id": task_id, "source_steps": used_steps},
     }
     with open(os.path.join(folder, "skill.json"), "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
@@ -333,6 +346,7 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
 
 
 def main() -> None:
+    """CLI: enrich + distill selected AgentNet trajectories into per-skill folders."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--in", dest="in_path", required=True, help="AgentNet ubuntu jsonl")
     parser.add_argument("--img-dirs", default="batch_imgs,test_imgs", help="comma-separated screenshot dirs")
