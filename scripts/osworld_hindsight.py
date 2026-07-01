@@ -170,9 +170,12 @@ def m4_synthesize(goal: str, actions: List[str], mu: List[str], cfg: HindsightCo
         "pre-existing app state go in 'observations'.\n"
         "(3) VERDICT - judge the outcome: 'degenerate_error' if the only outcome is an error/failure state "
         "(cannot connect/open, stuck); 'degenerate_noop' if it accomplishes nothing (opens then dismisses, "
-        "verifies emptiness, fails to perform the intended change); otherwise 'clean'.\n"
+        "verifies emptiness, fails to perform the intended change); 'navigation_only' if the end state is "
+        "merely reaching a UI location (a menu/panel/dialog opened, a tool selected, a view/tab switched, an "
+        "app launched) WITHOUT producing or editing content, applying a setting, or saving/exporting a file; "
+        "otherwise 'clean'.\n"
         'Return ONLY JSON {"task": "...", "plan": ["..."], "constraints": ["..."], "observations": ["..."], '
-        '"verdict": "clean|degenerate_error|degenerate_noop", "verdict_reason": "..."}.'
+        '"verdict": "clean|degenerate_error|degenerate_noop|navigation_only", "verdict_reason": "..."}.'
     )
     body = (
         f"ORIGINAL LOOSE GOAL: {goal}\n\nACTIONS:\n" + "\n".join(f"{i+1}. {a}" for i, a in enumerate(actions)) +
@@ -190,7 +193,7 @@ def m4_synthesize(goal: str, actions: List[str], mu: List[str], cfg: HindsightCo
     if not isinstance(obj, dict):
         return _empty_task()
     verdict = str(obj.get("verdict", "clean")).strip() or "clean"
-    if verdict not in ("clean", "degenerate_error", "degenerate_noop"):
+    if verdict not in ("clean", "degenerate_error", "degenerate_noop", "navigation_only"):
         verdict = "clean"
     return {"task": str(obj.get("task", "")).strip(),
             "plan": [str(p) for p in obj.get("plan", []) if isinstance(p, str)],
@@ -242,6 +245,7 @@ def main() -> None:
             raise SystemExit(f"reuse-experiences file not found: {cfg.reuse_path}")
     clean: List[Dict[str, Any]] = []
     degenerate: List[Dict[str, Any]] = []
+    trivial: List[Dict[str, Any]] = []
     for tj in trajs:
         if tj.get("n_steps", 0) < cfg.min_steps:
             logger.info("skip %s (only %d steps)", tj.get("goal", "")[:40], tj.get("n_steps", 0))
@@ -258,15 +262,19 @@ def main() -> None:
         rec = {**d_tilde, "original_goal": tj["goal"], "app": tj["app"],
                "n_steps": tj["n_steps"], "end_reason": tj.get("end_reason"),
                "experiences": mu, "trajectory_dir": tj["dir"]}
-        (clean if d_tilde["verdict"] == "clean" else degenerate).append(rec)
-        logger.info("[%s|%s] -> %s", tj["app"], d_tilde["verdict"], d_tilde["task"][:70])
+        v = d_tilde["verdict"]
+        (clean if v == "clean" else trivial if v == "navigation_only" else degenerate).append(rec)
+        logger.info("[%s|%s] -> %s", tj["app"], v, d_tilde["task"][:70])
 
     root, ext = os.path.splitext(cfg.out_path)
-    deg_path = f"{root}_degenerate{ext or '.jsonl'}"
+    ext = ext or ".jsonl"
+    deg_path = f"{root}_degenerate{ext}"
+    trivial_path = f"{root}_trivial{ext}"
     _write_jsonl(cfg.out_path, clean)
     _write_jsonl(deg_path, degenerate)
-    logger.info("wrote %d clean -> %s | %d degenerate -> %s",
-                len(clean), cfg.out_path, len(degenerate), deg_path)
+    _write_jsonl(trivial_path, trivial)
+    logger.info("wrote %d clean -> %s | %d degenerate -> %s | %d trivial -> %s",
+                len(clean), cfg.out_path, len(degenerate), deg_path, len(trivial), trivial_path)
     logger.info("NEXT: feed the CLEAN aligned tasks+trajectories to skill-summarization + self-OPD.")
 
 
