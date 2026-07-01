@@ -124,26 +124,21 @@ eval OSWorld 官方 369(撤 skill):基线 8B 10.78% → 目标内化逼近 MMSki
 
 ---
 
-## ★ 2026-07-01 实施进展:方案 B 任务质量审计 + 修复(P1/P2/P3)
+## ★ 2026-07-01:方案 B 任务质量 · 修复的三个 bug(P1/P2/P3)
 
-> 对方案 B 产出的 362 条 peeu_task 做体检,发现并修了三类问题。代码:`osworld_hindsight.py`(M3/M4)、`osworld_explorer.py`(vs_code reset)。
+> 对方案 B 产出的 peeu_task 做体检,定位并修复三个 bug。代码:`osworld_hindsight.py`(M3/M4)、`osworld_explorer.py`(vs_code reset);均已 commit + push + 同步远程,并在真实数据 / VM 上验证修复生效。
 
-### 审计结论(362 任务)
-- 整体健康:283/362 = 78% done,≥8 步过程级 40%,0 重复方向。
-- **P1 · 约束噪声(27%,gimp 74%/vs_code 80%)**:M4 把"观测到的 UI 状态"(下拉框内容、默认设置、偶发计数)也写进了 `constraints`,而非真任务要求。
-- **P2 · 退化任务(~12%)**:① 报错收尾(chrome 无网/vlc 无碟/thunderbird 连不上,15 条)② 否定/空操作(开菜单又关、确认为空、该删没删,29 条)——end_reason=done 但无正向成果,虚高了 283 正样本。
-- **P3 · vs_code 状态泄漏**:`env.reset` 重启 `code` 时单实例只重聚焦旧脏窗口 + 会话自动恢复 → Settings 等状态泄漏给后续 goal。
+### P1 · 约束被观测态污染
+- **bug**:M3/M4 提示词把"看到的界面状态"(菜单/下拉框内容、对话框默认值、偶发计数)也当成 `constraints` 抽出来,导致约束里混入非任务要求。
+- **修复**:提示词区分"任务要求 vs 观测态"——观测态分流到新字段 `observations`,`constraints` 只留可核验的成功条件;去掉"越严越好"。
 
-### 修复
-- **P1**:M3/M4 prompt——ambient UI 状态分流进新字段 `observations`,`constraints` 只留可核验的成功条件;去掉"越严越好"。
-- **P2**:M4 新增 `verdict`(clean / degenerate_error / degenerate_noop),`main()` 把退化任务路由到 `*_degenerate.jsonl`(隔离不删,排除出正样本池)。
-- **P3**:`ROOT_CONFIG["vs_code"]` reset——先 `pkill` + 关会话恢复(`window.restoreWindows:none`)+ `--disable-workspace-trust --new-window`。
+### P2 · 退化任务未隔离
+- **bug**:以 `end_reason==done` 当正样本,但"报错收尾"(环境无网/无媒体/连不上)和"空操作/否定"(开菜单又关、确认为空、该删没删)的轨迹也混进了正样本池。
+- **修复**:M4 增加 `verdict`(clean / degenerate_error / degenerate_noop),`main()` 把退化任务路由到 `*_degenerate.jsonl` 隔离(不删,排除出正样本池)。
 
-### 验证(真实数据 / VM)
-- P1:gimp 实测——噪声进 observations,constraints 只剩真要求 ✓
-- P2:vlc 实测——"播 DVD / 网络流"判 degenerate_error 隔离,正常任务 clean ✓
-- P3:VM 实测——reset 产出无会话恢复的纯净 VS Code 窗口 ✓
-- ⚠️ 存量 362 待用新 prompt **M4-only 重跑**;vs_code 需**重新探索**(脏数据在轨迹层)。
+### P3 · vs_code reset 状态泄漏
+- **bug**:`env.reset` 重启 `code` 时,VS Code 单实例 + 自动恢复上次会话 → reset 只重聚焦旧脏窗口,上一个 goal 的界面状态(如 Settings 页)泄漏进后续 goal 的轨迹。
+- **修复**:reset 改为先 `pkill` 杀进程 + 关会话恢复(`window.restoreWindows:none`)+ `--disable-workspace-trust --new-window`。
 
 ---
 
