@@ -1,26 +1,28 @@
 """AgentNet trajectory -> multimodal skill (traj2skill).
 
-DISTILL (not translate) reusable multimodal skills from complete AgentNet human
-trajectories, per doc/skill_schema.md. An MLLM (GPT-5.5) reads the WHOLE trajectory
-and EXTRACTS the reusable skill(s) inside it (it decides how many), applying MILD
-abstraction: keep the concrete procedure + UI targets, but lift task-specific values
-(filenames, entered text, target names) into {parameter} slots. Visual anchors are
-grounded on the real screenshots only for the steps that need them (L1 vision).
+Treat AgentNet as a MINIMAL rollout trajectory: use ONLY the per-step screenshot and
+the executed action (verb + normalized coords + value); IGNORE its rich human/model
+annotations (thought, reflection, quality flags). This matches what a real agent
+rollout actually gives you, and makes it easy to feed richer fields later (few -> many).
 
-Pipeline per trajectory:
-  adapt   AgentNet record -> normalized {task, steps:[{image, code, thought, action,
-          reflection}]}, dropping steps flagged redundant.
-  Pass-1  text-only distillation: MLLM -> list of skills; each step references its
-          source trajectory step and carries intent/target/anchor?/verify?.
-  Pass-2  L1 vision: for anchor steps, read the screenshot + click point -> confirm
-          and tighten bbox_norm + semantic target (falls back to a coord box if the
-          screenshot is not available locally).
+Two stages:
+  (1) ENRICH  per step, MLLM + vision (the ONLY vision stage). From [before frame,
+      after frame, action] -> {target (semantic), effect, anchor_bbox (tight box on the
+      target on the BEFORE frame; pointer actions only), change_bbox (changed region on
+      the AFTER frame; null if diffuse)}. Turns raw pixels+coords into text + boxes.
+  (2) DISTILL  whole trajectory, MLLM, TEXT-ONLY (no vision). From task + enriched steps
+      -> reusable multimodal skill(s): the model decides how many, applies mild
+      abstraction (values -> {parameters}), drops glue steps, sets per-step intent /
+      needs_anchor / verification.
+
+Output: one FOLDER per skill -- <NNN>_<name>/skill.json + frames/ (full screenshots).
+All skill content is ENGLISH.
 
 Endpoint from env: OPENAI_BASE_URL, OPENAI_API_KEY, OSWORLD_PROPOSER_MODEL (gpt-5.5).
 
 Run:
   python agentnet_traj2skill.py --in agentnet_ubuntu_5k.jsonl \
-      --img-dirs batch_imgs,test_imgs --out agentnet_skills.jsonl --limit 20
+      --img-dirs batch_imgs,test_imgs --out-dir outputs/agentnet_skills_v2 --limit 20
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -44,19 +47,19 @@ _NUM = r"[-+]?\d*\.?\d+"
 _VERB_MAP = {"click": "click", "doubleClick": "double_click", "rightClick": "right_click",
              "moveTo": "move", "dragTo": "drag", "scroll": "scroll", "hotkey": "hotkey",
              "press": "press", "typewrite": "type", "write": "type"}
+_POINTER = {"click", "double_click", "right_click", "move", "drag"}
 
 
 @dataclass(frozen=True)
 class T2SConfig:
     in_path: str
     img_dirs: Tuple[str, ...]
-    out_path: str
+    out_dir: str
     model: str
     temperature: float
     limit: int
     min_alignment: int
     require_images: bool
-    use_vision: bool
 
 
 # ---------- GPT-5.5 ----------
@@ -89,11 +92,7 @@ def call_gpt(messages: List[Dict[str, Any]], cfg: T2SConfig, retries: int = 5) -
 
 
 def _extract_json(raw: str) -> Optional[Any]:
-    """Parse the first DECODABLE JSON object/array in a model reply.
-
-    Scans every '{'/'[' start (not just the first) so a stray brace in prose before
-    the real JSON does not silently yield None.
-    """
+    """Parse the first decodable JSON object/array in a model reply."""
     raw = re.sub(r"```(?:json)?", "", raw)
     for s in (i for i, c in enumerate(raw) if c in "{["):
         try:
@@ -112,14 +111,10 @@ def _read_bytes(path: str) -> Optional[bytes]:
         return None
 
 
-# ---------- pyautogui code parsing ----------
+# ---------- helpers ----------
 
 def parse_code(code: str) -> Dict[str, Any]:
-    """pyautogui.<fn>(...) -> {verb, value, x, y} (coords already normalized 0-1).
-
-    Assumes ONE pyautogui statement per step (AgentNet's format); the first call is
-    parsed if more are present.
-    """
+    """pyautogui.<fn>(...) -> {verb, value, x, y} (coords already normalized 0-1)."""
     m = re.search(r"pyautogui\.(\w+)\((.*)\)", (code or "").strip(), re.S)
     if not m:
         return {"verb": "unknown", "value": "", "x": None, "y": None}
@@ -127,7 +122,7 @@ def parse_code(code: str) -> Dict[str, Any]:
     verb = _VERB_MAP.get(fn, fn)
     value = ""
     if verb == "type":
-        vm = re.search(r"""(['"])(.*?)\1""", args, re.S)  # first string literal, non-greedy
+        vm = re.search(r"""(['"])(.*?)\1""", args, re.S)
         value = vm.group(2) if vm else ""
     elif verb in ("hotkey", "press"):
         value = "+".join(re.findall(r"""['"]([^'"]+)['"]""", args))
@@ -136,8 +131,8 @@ def parse_code(code: str) -> Dict[str, Any]:
         value = sm.group(1) if sm else ""
     xm = re.search(rf"x\s*=\s*({_NUM})", args)
     ym = re.search(rf"y\s*=\s*({_NUM})", args)
-    if xm is None and ym is None and verb in ("click", "double_click", "right_click", "move", "drag"):
-        pos = re.findall(_NUM, args)  # positional coords: click(0.018, 0.508)
+    if xm is None and ym is None and verb in _POINTER:
+        pos = re.findall(_NUM, args)
         x = float(pos[0]) if len(pos) >= 2 else None
         y = float(pos[1]) if len(pos) >= 2 else None
     else:
@@ -146,11 +141,20 @@ def parse_code(code: str) -> Dict[str, Any]:
     return {"verb": verb, "value": value, "x": x, "y": y}
 
 
-def _point_box(x: float, y: float, w: float = 0.04, h: float = 0.04) -> List[float]:
-    return [round(max(0.0, x - w / 2), 4), round(max(0.0, y - h / 2), 4), w, h]
+def _clamp_box(b: Any) -> Optional[List[float]]:
+    if not (isinstance(b, list) and len(b) == 4):
+        return None
+    try:
+        return [round(min(1.0, max(0.0, float(c))), 4) for c in b]
+    except (TypeError, ValueError):
+        return None
 
 
-# ---------- adapter: AgentNet record -> normalized trajectory ----------
+def _sanitize(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", name.strip().lower()).strip("_")[:60] or "skill"
+
+
+# ---------- adapter: AgentNet record -> minimal trajectory ----------
 
 def find_images(img_dirs: Tuple[str, ...]) -> Dict[str, str]:
     idx: Dict[str, str] = {}
@@ -163,17 +167,11 @@ def find_images(img_dirs: Tuple[str, ...]) -> Dict[str, str]:
 
 
 def normalize(rec: Dict[str, Any]) -> Dict[str, Any]:
-    steps: List[Dict[str, Any]] = []
-    for st in rec.get("traj", []):
-        v = st.get("value", {})
-        if v.get("last_step_redundant"):
-            continue
-        steps.append({"index": st.get("index"), "image": st.get("image", ""),
-                      "code": v.get("code", ""), "thought": v.get("thought", ""),
-                      "action": v.get("action", ""), "reflection": v.get("reflection", "")})
+    """Keep ONLY {index, image, code} per step -- treat as a bare rollout."""
+    steps = [{"index": st.get("index"), "image": st.get("image", ""),
+              "code": st.get("value", {}).get("code", "")} for st in rec.get("traj", [])]
     return {"task_id": rec.get("task_id", ""),
             "task": rec.get("actual_task") or rec.get("natural_language_task") or rec.get("instruction", ""),
-            "difficulty": rec.get("task_difficulty"), "alignment": rec.get("alignment_score"),
             "steps": steps}
 
 
@@ -196,136 +194,153 @@ def select(cfg: T2SConfig, img_index: Dict[str, str]) -> List[Dict[str, Any]]:
     return out
 
 
-# ---------- Pass-1: distill reusable skill(s) from the whole trajectory ----------
+# ---------- (1) ENRICH: per-step vision -> text + boxes ----------
 
-SKILL_SYS = (
-    "You are given ONE complete human trajectory that accomplishes a desktop task on Ubuntu: the TASK, then "
-    "per-step {thought, action, code, reflection}. EXTRACT the reusable multimodal SKILL(S) this trajectory "
-    "demonstrates -- DISTILL, do not transcribe. Rules:\n"
-    "- A skill is a REUSABLE competence (a coherent how-to applicable to other, similar tasks), NOT a replay "
-    "of this run. Decide how many skills this trajectory contains (usually 1, sometimes a few) and return each.\n"
-    "- MILD ABSTRACTION: keep the concrete procedure and its UI targets, but replace task-specific VALUES "
-    "(filenames, entered text, search terms, specific target names) with {parameter} slots, and list them in "
-    "'parameters'.\n"
-    "- Keep ONLY the essential steps; DROP glue / navigation / backtracking. One step = ONE action (do not merge "
-    "actions); you MAY drop steps. Each skill step MUST reference its 'source_step' (the trajectory step index).\n"
-    "- Per step decide: needs_anchor (true if the target is a specific on-screen element that must be seen to "
-    "locate, e.g. an icon or menu item; false for obvious/global targets or keyboard actions); needs_verify "
-    "(true only for steps producing a meaningful, checkable state change) + a short 'verify_cue'.\n"
-    "- intent = the step's purpose; target = a semantic description of what is acted on (NO coordinates).\n"
-    'Return ONLY JSON: {"skills": [{"name": "snake_case_verb_phrase", "description": "...", '
-    '"domain": "gimp|chrome|libreoffice_calc|libreoffice_writer|libreoffice_impress|vlc|vs_code|thunderbird|os|multi_apps", '
-    '"preconditions": ["..."], "parameters": [{"name": "...", "example": "..."}], "steps": [{"source_step": int, '
-    '"intent": "...", "target": "...", "needs_anchor": true, "needs_verify": false, "verify_cue": ""}]}]}'
+ENRICH_SYS = (
+    "You see the screen BEFORE an action, the screen AFTER it, and the action (a pyautogui verb + normalized "
+    "0-1 click point + value). Describe, in ENGLISH, what this ONE step did. Return ONLY JSON: "
+    '{"target": "<semantic description of the on-screen element acted on; for keyboard actions describe the '
+    'focused context>", "effect": "<one sentence: what changed from BEFORE to AFTER>", "anchor_bbox": '
+    "[x,y,w,h] or null, \"change_bbox\": [x,y,w,h] or null}. anchor_bbox = a TIGHT normalized box around the "
+    "TARGET element on the BEFORE screen (null for keyboard/scroll actions with no visual target). change_bbox "
+    "= normalized box of the CHANGED region on the AFTER screen (null if the change is diffuse: a new window, "
+    "a full-screen repaint, or an app switch)."
 )
 
 
-def distill(traj: Dict[str, Any], cfg: T2SConfig) -> List[Dict[str, Any]]:
-    lines = [
-        f"[step {st['index']}] thought: {st['thought'][:220]}\n"
-        f"  action: {st['action'][:180]}\n  code: {st['code']}\n"
-        f"  reflection: {st['reflection'][:180]}"
-        for st in traj["steps"]
-    ]
-    body = (f"TASK: {traj['task']}\n\nTRAJECTORY ({len(traj['steps'])} kept steps):\n"
-            + "\n".join(lines) + "\n\nExtract the reusable skill(s) as JSON.")
-    raw = call_gpt([{"role": "system", "content": SKILL_SYS}, {"role": "user", "content": body}], cfg)
-    obj = _extract_json(raw)
+def enrich_step(before: Optional[bytes], after: Optional[bytes], pc: Dict[str, Any],
+                cfg: T2SConfig) -> Dict[str, Any]:
+    parts: List[Dict[str, Any]] = [{"type": "text", "text":
+        f"ACTION: verb={pc['verb']} point=({pc['x']},{pc['y']}) value={pc['value']!r}\n(BEFORE, then AFTER)"}]
+    if before:
+        parts.append(_img_block(before))
+    if after:
+        parts.append(_img_block(after))
+    obj = _extract_json(call_gpt([{"role": "system", "content": ENRICH_SYS},
+                                  {"role": "user", "content": parts}], cfg))
+    if not isinstance(obj, dict):
+        return {"target": "", "effect": "", "anchor_bbox": None, "change_bbox": None}
+    return {"target": str(obj.get("target", "")), "effect": str(obj.get("effect", "")),
+            "anchor_bbox": _clamp_box(obj.get("anchor_bbox")), "change_bbox": _clamp_box(obj.get("change_bbox"))}
+
+
+def enrich_traj(traj: Dict[str, Any], img_index: Dict[str, str], cfg: T2SConfig) -> List[Dict[str, Any]]:
+    steps = traj["steps"]
+    enriched: List[Dict[str, Any]] = []
+    for i, st in enumerate(steps):
+        pc = parse_code(st["code"])
+        before_name = st["image"]
+        after_name = steps[i + 1]["image"] if i + 1 < len(steps) else ""
+        before = _read_bytes(img_index.get(before_name, ""))
+        after = _read_bytes(img_index.get(after_name, "")) if after_name else None
+        e = enrich_step(before, after, pc, cfg)
+        if pc["verb"] not in _POINTER:  # keyboard/scroll actions never carry an anchor box
+            e["anchor_bbox"] = None
+        enriched.append({"index": st["index"], "verb": pc["verb"], "value": pc["value"],
+                         "target": e["target"], "effect": e["effect"],
+                         "anchor_bbox": e["anchor_bbox"], "change_bbox": e["change_bbox"],
+                         "before_image": before_name, "after_image": after_name})
+    return enriched
+
+
+# ---------- (2) DISTILL: whole-trajectory text -> reusable skill(s) ----------
+
+DISTILL_SYS = (
+    "You are given a TASK and an agent's step-by-step trajectory that accomplished it; each step lists "
+    "{verb, value, target (the element acted on), effect (what changed)}. EXTRACT the reusable multimodal "
+    "SKILL(S) this trajectory demonstrates -- DISTILL, do not transcribe. ALL OUTPUT IN ENGLISH. Rules:\n"
+    "- A skill is a REUSABLE competence applicable to other similar tasks, NOT a replay of this run. Decide "
+    "how many skills this trajectory contains (usually 1, sometimes a few) and return each.\n"
+    "- MILD ABSTRACTION: keep the concrete procedure and its UI targets, but replace task-specific VALUES "
+    "(filenames, typed text, search terms, specific names) with {parameter} slots; list them in 'parameters'.\n"
+    "- Keep ONLY essential steps; DROP glue / navigation / backtracking. One step = one action; you MAY drop "
+    "steps. Each skill step MUST reference its 'source_step' index.\n"
+    "- Per step: needs_anchor (true if the target is a specific on-screen element that must be seen to locate, "
+    "e.g. an icon / menu item / small control; false for keyboard actions or obvious / unique / large targets); "
+    "needs_verify (true only for a meaningful, checkable state change) + a short 'verify_cue'.\n"
+    "- intent = the step's purpose; target = concise semantic description (NO coordinates).\n"
+    'Return ONLY JSON {"skills":[{"name":"snake_case_verb_phrase","description":"...","domain":"gimp|chrome|'
+    'libreoffice_calc|libreoffice_writer|libreoffice_impress|vlc|vs_code|thunderbird|os|multi_apps",'
+    '"preconditions":["..."],"parameters":[{"name":"...","example":"..."}],"steps":[{"source_step":0,'
+    '"intent":"...","target":"...","needs_anchor":true,"needs_verify":false,"verify_cue":""}]}]}'
+)
+
+
+def distill(task: str, enriched: List[Dict[str, Any]], cfg: T2SConfig) -> List[Dict[str, Any]]:
+    lines = [f"[step {e['index']}] verb={e['verb']} value={e['value']!r} | target: {e['target'][:120]} "
+             f"| effect: {e['effect'][:120]}" for e in enriched]
+    body = (f"TASK: {task}\n\nTRAJECTORY ({len(enriched)} steps):\n" + "\n".join(lines)
+            + "\n\nExtract the reusable skill(s) as JSON.")
+    obj = _extract_json(call_gpt([{"role": "system", "content": DISTILL_SYS},
+                                  {"role": "user", "content": body}], cfg))
     skills = obj.get("skills", []) if isinstance(obj, dict) else []
     return [s for s in skills if isinstance(s, dict) and s.get("steps")]
 
 
-# ---------- Pass-2: L1 vision grounding of an anchor ----------
+# ---------- assemble + write one skill folder ----------
 
-ANCHOR_SYS = (
-    "A skill step acts on a specific on-screen element. Given the screenshot and a click point (normalized "
-    "0-1), confirm the element at/near the point matches the described target and return a TIGHT normalized "
-    'bounding box around that target element. Return ONLY JSON {"confirmed": true, "bbox_norm": [x, y, w, h], '
-    '"target": "corrected-or-same short description"}.'
-)
-
-
-def ground_anchor(target: str, point: Tuple[float, float], img_path: str,
-                  cfg: T2SConfig) -> Optional[Dict[str, Any]]:
-    png = _read_bytes(img_path)
-    if not png:
-        return None
-    user = [{"type": "text", "text": f"Click point: x={point[0]}, y={point[1]}. Target: {target[:150]}"},
-            _img_block(png)]
-    obj = _extract_json(call_gpt([{"role": "system", "content": ANCHOR_SYS},
-                                  {"role": "user", "content": user}], cfg))
-    return obj if isinstance(obj, dict) else None
-
-
-# ---------- assemble final skills ----------
-
-def build(traj: Dict[str, Any], skills: List[Dict[str, Any]], img_index: Dict[str, str],
-          cfg: T2SConfig) -> Tuple[List[Dict[str, Any]], int, int]:
-    step_by_idx = {st["index"]: st for st in traj["steps"]}
-    built: List[Dict[str, Any]] = []
-    grounded = fallback = 0
-    for sk in skills:
-        steps_out: List[Dict[str, Any]] = []
-        for ss in sk.get("steps", []):
-            try:
-                key: Any = int(ss.get("source_step"))
-            except (TypeError, ValueError):
-                key = ss.get("source_step")
-            src = step_by_idx.get(key)
-            if src is None:
-                logger.debug("drop step: unknown source_step %r (task %s)",
-                             ss.get("source_step"), traj["task_id"][:8])
-                continue
-            pc = parse_code(src["code"])
-            step: Dict[str, Any] = {
-                "intent": str(ss.get("intent", "")),
-                "action": {"verb": pc["verb"], "target": str(ss.get("target", "")), "value": pc["value"]},
-            }
-            if ss.get("needs_anchor") and pc["x"] is not None:
-                anchor = {"frame_ref": src["image"], "bbox_norm": _point_box(pc["x"], pc["y"])}
-                grounded_ok = False
-                if cfg.use_vision:
-                    g = ground_anchor(step["action"]["target"], (pc["x"], pc["y"]),
-                                      img_index.get(src["image"], ""), cfg)
-                    if g and isinstance(g.get("bbox_norm"), list) and len(g["bbox_norm"]) == 4:
-                        try:
-                            anchor["bbox_norm"] = [round(min(1.0, max(0.0, float(c))), 4) for c in g["bbox_norm"]]
-                            if g.get("target"):
-                                step["action"]["target"] = str(g["target"])
-                            grounded_ok = True
-                        except (TypeError, ValueError):
-                            grounded_ok = False
-                grounded += int(grounded_ok)
-                fallback += int(not grounded_ok)
-                step["visual_anchor"] = anchor
-            if ss.get("needs_verify") and ss.get("verify_cue"):
-                step["verification"] = {"cue": str(ss["verify_cue"]), "frame_ref": src["image"]}
-            steps_out.append(step)
-        if not steps_out:
+def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], img_index: Dict[str, str],
+                out_dir: str, seq: int, task_id: str) -> bool:
+    name = _sanitize(str(skill.get("name", "skill")))
+    folder = os.path.join(out_dir, f"{seq:03d}_{name}")
+    frames_dir = os.path.join(folder, "frames")
+    steps_out: List[Dict[str, Any]] = []
+    copies: List[Tuple[str, str]] = []
+    for ss in skill.get("steps", []):
+        try:
+            key: Any = int(ss.get("source_step"))
+        except (TypeError, ValueError):
+            key = ss.get("source_step")
+        e = enr_by_idx.get(key)
+        if e is None:
+            logger.debug("drop step: unknown source_step %r (task %s)", ss.get("source_step"), task_id[:8])
             continue
-        built.append({
-            "name": str(sk.get("name", "")),
-            "description": str(sk.get("description", "")),
-            "domain": str(sk.get("domain", "")),
-            "preconditions": [str(p) for p in sk.get("preconditions", []) if isinstance(p, str)],
-            "parameters": [p for p in sk.get("parameters", []) if isinstance(p, dict)],
-            "steps": steps_out,
-            "provenance": {"dataset": "agentnet", "task_id": traj["task_id"],
-                           "source_steps": [ss.get("source_step") for ss in sk.get("steps", [])]},
-        })
-    return built, grounded, fallback
+        step: Dict[str, Any] = {
+            "intent": str(ss.get("intent", "")),
+            "action": {"verb": e["verb"], "target": str(ss.get("target") or e["target"]), "value": e["value"]},
+        }
+        if ss.get("needs_anchor") and e["anchor_bbox"] and e["before_image"] in img_index:
+            fn = f"step{e['index']}_anchor.png"
+            step["visual_anchor"] = {"frame": f"frames/{fn}", "bbox_norm": e["anchor_bbox"]}
+            copies.append((img_index[e["before_image"]], os.path.join(frames_dir, fn)))
+        if ss.get("needs_verify") and ss.get("verify_cue"):
+            ver: Dict[str, Any] = {"cue": str(ss["verify_cue"])}
+            if e["after_image"] and e["after_image"] in img_index:
+                fn = f"step{e['index']}_after.png"
+                ver["frame"] = f"frames/{fn}"
+                ver["bbox_norm"] = e["change_bbox"]
+                copies.append((img_index[e["after_image"]], os.path.join(frames_dir, fn)))
+            step["verification"] = ver
+        steps_out.append(step)
+    if not steps_out:
+        return False
+    os.makedirs(frames_dir, exist_ok=True)
+    for src, dst in copies:
+        shutil.copyfile(src, dst)
+    doc = {
+        "name": name,
+        "description": str(skill.get("description", "")),
+        "domain": str(skill.get("domain", "")),
+        "preconditions": [str(p) for p in skill.get("preconditions", []) if isinstance(p, str)],
+        "parameters": [p for p in skill.get("parameters", []) if isinstance(p, dict)],
+        "steps": steps_out,
+        "provenance": {"dataset": "agentnet", "task_id": task_id,
+                       "source_steps": [ss.get("source_step") for ss in skill.get("steps", [])]},
+    }
+    with open(os.path.join(folder, "skill.json"), "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False, indent=2)
+    return True
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--in", dest="in_path", required=True, help="AgentNet ubuntu jsonl")
     parser.add_argument("--img-dirs", default="batch_imgs,test_imgs", help="comma-separated screenshot dirs")
-    parser.add_argument("--out", required=True, help="output skills jsonl")
+    parser.add_argument("--out-dir", required=True, help="output dir (one folder per skill)")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--min-alignment", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.4)
     parser.add_argument("--require-images", action="store_true", help="only trajectories with all frames present")
-    parser.add_argument("--no-vision", action="store_true", help="skip L1 vision grounding (coord box only)")
     args = parser.parse_args()
 
     if args.limit < 1:
@@ -335,9 +350,9 @@ def main() -> None:
 
     cfg = T2SConfig(in_path=args.in_path,
                     img_dirs=tuple(d.strip() for d in args.img_dirs.split(",") if d.strip()),
-                    out_path=args.out, model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"),
+                    out_dir=args.out_dir, model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"),
                     temperature=args.temperature, limit=args.limit, min_alignment=args.min_alignment,
-                    require_images=args.require_images, use_vision=not args.no_vision)
+                    require_images=args.require_images)
 
     img_index = find_images(cfg.img_dirs)
     logger.info("indexed %d screenshots from %s", len(img_index), list(cfg.img_dirs))
@@ -346,27 +361,26 @@ def main() -> None:
     except FileNotFoundError:
         raise SystemExit(f"input not found: {cfg.in_path}")
     logger.info("selected %d trajectories (completed, alignment>=%d)", len(trajs), cfg.min_alignment)
+    os.makedirs(cfg.out_dir, exist_ok=True)
 
-    all_skills: List[Dict[str, Any]] = []
-    tot_grounded = tot_fallback = 0
+    nskills = 0
     for i, tj in enumerate(trajs):
         try:
-            skills = distill(tj, cfg)
-            built, g, f = build(tj, skills, img_index, cfg)
+            enriched = enrich_traj(tj, img_index, cfg)
+            skills = distill(tj["task"], enriched, cfg)
+            enr_by_idx = {e["index"]: e for e in enriched}
+            written = 0
+            for sk in skills:
+                if write_skill(sk, enr_by_idx, img_index, cfg.out_dir, nskills + 1, tj["task_id"]):
+                    nskills += 1
+                    written += 1
         except Exception as e:  # one trajectory must not kill the batch
             logger.error("traj %s failed: %s", tj.get("task_id", "")[:8], e, exc_info=True)
             continue
-        all_skills.extend(built)
-        tot_grounded += g
-        tot_fallback += f
-        logger.info("[%d/%d] %s (%d steps) -> %d skill(s)", i + 1, len(trajs),
-                    tj.get("task_id", "")[:8], len(tj["steps"]), len(built))
+        logger.info("[%d/%d] %s (%d steps) -> %d skill(s) [total %d]",
+                    i + 1, len(trajs), tj["task_id"][:8], len(tj["steps"]), written, nskills)
 
-    with open(cfg.out_path, "w", encoding="utf-8") as fh:
-        for sk in all_skills:
-            fh.write(json.dumps(sk, ensure_ascii=False) + "\n")
-    logger.info("wrote %d skills -> %s | anchors: %d vision-grounded, %d coord-fallback",
-                len(all_skills), cfg.out_path, tot_grounded, tot_fallback)
+    logger.info("wrote %d skills -> %s", nskills, cfg.out_dir)
 
 
 if __name__ == "__main__":
