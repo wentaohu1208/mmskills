@@ -163,7 +163,7 @@ on-policy 轨迹(截图+动作)──▶ 作为 ③ 总结多模态 skill 的原
 
 ---
 
-## 附录:参考文献汇总(17 篇 · id/标题全部硬核)
+## 附录:参考文献汇总(19 篇 · id/标题全部硬核)
 
 > 按"在本方案里扮演的角色"分 4 组。**[精读]** = 走过 paper-deep-read / 复现;**[调研]** = survey 抓取。所有标题经 pdftotext 或 arXiv API 核验,id 均已确认正确。
 
@@ -198,8 +198,10 @@ on-policy 轨迹(截图+动作)──▶ 作为 ③ 总结多模态 skill 的原
 
 | 简称 | 标题 | 链接 | 角色 | 状态 |
 |---|---|---|---|---|
-| **OSWorld** | OSWorld: Benchmarking Multimodal Agents for Open-Ended Tasks in Real Computer Environments | https://arxiv.org/abs/2404.07972 | 端到端真环境评测 | [调研] |
+| **OSWorld** | OSWorld: Benchmarking Multimodal Agents for Open-Ended Tasks in Real Computer Environments | https://arxiv.org/abs/2404.07972 | 端到端真环境评测(v1) | [调研] |
+| **OSWorld 2.0** | OSWorld2.0: Benchmarking Computer Use Agents on Long-Horizon Real-World Tasks | https://arxiv.org/abs/2606.29537 | 长程多应用工作流基准(2026);skill 组合的舞台 | [调研] |
 | **Video2GUI** | Video2GUI: Synthesizing Large-Scale Interaction Trajectories for Generalized GUI Agent Pretraining | https://arxiv.org/abs/2605.14747 | 路径三 video→轨迹 pipeline 基石(借 B 提取 + C grounding) | [精读] |
 | **OS-Atlas** | OS-ATLAS: A Foundation Action Model for Generalist GUI Agents | https://arxiv.org/abs/2410.23218 | 训练源候选(跨平台 grounding) | [调研] |
 | **OmniAct** | OmniACT: A Dataset and Benchmark for Enabling Multimodal Generalist Autonomous Agents for Desktop and Web | https://arxiv.org/abs/2402.17553 | 训练源候选(桌面小控件) | [调研] |
 | **ScreenSpot-Pro** | ScreenSpot-Pro: GUI Grounding for Professional High-Resolution Computer Use | https://arxiv.org/abs/2504.07981 | step-wise grounding 评测 | [调研] |
+| **OpenCUA / AgentNet** | OpenCUA: Open Foundations for Computer-Use Agents | https://arxiv.org/abs/2508.09123 | traj2skill 的 skill 源(Ubuntu 人类轨迹);其富字段=事后标注(佐证) | [调研] |

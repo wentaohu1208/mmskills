@@ -1,95 +1,119 @@
-# 多模态 skill 结构设计(暂定 schema)
+# 多模态 skill 结构设计(v3 · 相位化)
 
-> **目的**:定义一条「多模态 GUI agent skill」的结构——字段 / 模态 / 粒度。skill = `task → trajectory` 之后要总结出的产物。
-> **定位**:procedural memory 的**可读态**(人可读、可编辑、可蒸),**过程 / 子任务级**粒度。
-> **范围**:本文只谈"skill 长什么样";原料盘点(374 success / 1050 fail)、judge、文献与 memory 结构调研的背景留底见 `mmskillrl_0627.md`。
+> **目的**:定义一条「多模态 GUI agent skill」的结构,并给出从轨迹提炼 skill 的管线(`traj → skill`)。
+> **定位**:skill = procedural memory 的**可读态**(人可读、可编辑),**相位级**粒度(不是原子动作、也不是整任务)。
+> **范围**:本文只谈"skill 长什么样 + 怎么从轨迹提炼";**OPD 内化机制这一阶段先放一放**。背景原料/文献留底见 `mmskillrl_0627.md`。
+> **演进**:早期版是"每步一原子动作 + 每步 bbox"——太像清洗过的轨迹;v3 升级为**相位化 + 去坐标 + 值参数化**(见 §4 为什么)。
 
 ---
 
-## 1. 结构总览
+## 1. 管线总览(traj → skill)
 
 ```
-MultimodalSkill
-│
-├─ 第一层 · 身份 / 前置  ✅
-│   ├─ name            动词短语 · snake_case · 无域前缀        e.g. apply_paragraph_style_and_type
-│   ├─ description     一句话「做什么」= 检索键
-│   ├─ domain          所属域                                  gimp / libreoffice_writer / …
-│   └─ preconditions   跑它需要的前置状态                      e.g. “Writer 已打开空白文档”
-│
-├─ 第二层 · 过程主体 = 有序 steps[]  ✅   一步一动作;intent 可被相邻步共享   ← skill 核心
-│   └─ step_i
-│       ├─ intent          只说目的 · 不说做法 · 可跨相邻步共享
-│       ├─ action          verb    规范化动词  click / type / hotkey / drag / scroll
-│       │                  target  语义描述 · ⚠️ 不放坐标   e.g. “左上角段落样式下拉框”
-│       │                  value   输入内容 · 可变量化       e.g. “{text}”
-│       ├─ visual_anchor   〖动作前:目标长这样〗可选 · 仅“目标不显然”的步
-│       │                  frame_ref  动作前全屏(存指针)
-│       │                  bbox_norm  框「目标元素」 [x,y,w,h] ∈ 0~1
-│       └─ verification    〖动作后:成功了没〗可选 · 仅“状态跃迁”的步
-│                          cue        文字成功判据
-│                          frame_ref  动作后全屏(= 下一步截图)
-│                          bbox_norm  框「变化区域」 [x,y,w,h] ∈ 0~1
-│
-└─ 第三层 · 元信息  ⏳ 暂缓
-    parameters(变量槽,登记 value 里的 {…}) · provenance(来源轨迹) · links(关联 skill 边)
+输入:最基本的 rollout traj(真实场景底线)
+  task 指令  +  每步{ 截图 , 动作(verb, 归一化坐标, value) }
+        │
+ ① ENRICH  逐步 · MLLM + vision   ← 唯一用 vision 处
+   看[前截图 + 后截图 + 动作] → 每步:target(语义) / effect(变了啥)
+                                / anchor_bbox(框目标) / change_bbox(变化区域,可空)
+        │  enriched steps(把像素→文字 + 框)
+ ② DISTILL 整条 · MLLM · 纯文本   ← 不看图
+   读 task + enriched steps → 识别可复用 skill(自定几个)
+   把连续原子步「升层」成 3–6 个 phase;值→{slot};丢胶水步
+        │
+ write_skill:用 bbox 把框画到截图上存图(坐标画完即弃、不进 JSON);
+             值确定性替换成 {slot};一 skill 一文件夹
+        │
+输出:一 skill 一文件夹
 ```
 
-**三条纪律**(贯穿全结构):
-- 🚫 **action 不放坐标**——`target` 只用语义词;定位交给「全屏 `frame_ref` + 归一化 `bbox_norm`(0~1,不锁分辨率)」。
-- 🖼️ **存全屏、喂 crop**——存储存全屏(信息全);消费默认切 `frame_ref[bbox]` 成 crop,需空间消歧时才喂全屏 + 画出 bbox。
-- ✂️ **按需配置,不均匀铺满**——`visual_anchor` 只给"目标不显然"的步,`verification` 只给"有意义状态跃迁"的步。
-
-**已有意识砍掉的字段**:
-| 字段 | 原因 |
-|---|---|
-| `when_to_use` | 与 `description` 重叠(选择靠 description,执行靠 preconditions) |
-| `abstraction_level` | 粒度已锁 composite → 全表常量、零信息 |
-| `pitfalls`(易错/纠错) | 暂缓(将来用 1050 失败轨迹填,是差异化点) |
-| `focus_crop / context_frame / after_crop` | 并入 `frame_ref + bbox_norm` |
+- **源**:AgentNet(`xlangai/AgentNet` Ubuntu 人类轨迹),**当"最基本裸 traj"用——只取 image + code(截图+动作),丢弃其 thought/reflection 等事后标注**(见 §5)。
+- **脚本**:`scripts/agentnet_traj2skill.py`。
 
 ---
 
-## 2. 关键决策 & 理由
+## 2. skill 结构(v3 schema)
 
-**定位:走 Family 1(人可读)而非 latent。** 视觉记忆两大家族——①人可读(截图/crop + 文字,MMSkills/GUI-explorer)vs ②学习式连续 latent(Skill-CMIB `z`、CoMEM Q-Former 向量)。选①:可读、可编辑、可被下游蒸;latent 绑编码器、不可读、内化要连编码器一起蒸,是外挂性表示。
+**一 skill 一文件夹**:
+```
+NNN_<name>/
+  skill.json
+  frames/          每 phase:1 张 anchor 画框图 + 1 张 verify 画框图
+```
 
-**粒度 = 过程/子任务级(composite)。** 别 atomic(单动作)、别整任务;一个 skill = 一段可复用的多步操作模式。
+`skill.json`:
+```json
+{
+  "name": "set_vscode_dropdown_setting",
+  "description": "…(值处用 {slot})",
+  "domain": "vs_code",
+  "preconditions": ["…"],
+  "parameters": [{"name":"setting","example":"Word Wrap"}, {"name":"value","example":"on"}],
+  "phases": [
+    { "name":"open_settings_page",
+      "trigger":"VS Code is open and the Settings tab is not yet open",   // 整屏局面(动作前)
+      "action":"Open the Settings UI",                                    // 粗动作(带 {slot})
+      "visual_anchor":{"frame":"frames/phase1_anchor.png","object":"the Settings menu item"},  // 画了框的图 + 对象描述,无坐标
+      "verification":{"cue":"The Settings tab is open","frame":"frames/phase1_after.png"} },
+    { "name":"set_the_value",
+      "trigger":"The target setting row is visible",
+      "action":"Set {setting} to {value} via its dropdown",
+      "visual_anchor":{"frame":"frames/phase2_anchor.png","object":"the setting's dropdown control"},
+      "verification":{"cue":"The setting shows {value}","frame":"frames/phase2_after.png"} }
+  ],
+  "provenance": {"dataset":"agentnet","task_id":"…","phase_source_steps":[[0,1,2],[3,4,5,6]]}
+}
+```
 
-**name 无域前缀。** 撞名靠独立的 `domain` 字段区分,name 保持干净。
-
-**description = 检索键。** 主流系统(Voyager/Cradle/SkillWeaver/ExpeL/LEGOMem)都拿 description 的 embedding 检索 skill。故写法用"任务指令会用的词、说结果/目标",不写过程;"何时用"不掺进来。
-
-**preconditions 只留状态门槛。** 回答"这条 skill 现在跑得起来吗"(匹配当前屏幕),与 description 的"该不该选它"(匹配意图)分工;`when_to_use` 夹在中间、两头重叠,砍。
-
-**坐标不进 skill。** 绝对像素坐标锁分辨率、诱导"照抄坐标";改用「语义 target + 视觉 anchor」。原始 `click(x,y)` 只用来**裁 crop、算 bbox_norm,用完即弃**;保留的是归一化 bbox(0~1),锚位置又不锁布局。附带好处:模型 rollout 的 response 原生就是归一化坐标,`bbox_norm` 直接可得、无需换算。
-
-**存全屏、消费切 crop(存储 ≠ 消费)。** `crop = 全屏[bbox]`,全屏+bbox 是信息超集、能随时切出 crop;反之只存 crop 则永久丢上下文。crop 的两个好处(省 token、防过度锚定)是**消费端**优化,不该提前到存储端做裁剪。截图 rollout 已落盘,skill 存**指针**近乎零成本。
-
-**按需配置(anchor / verify 不铺满)。** 三个理由:①文字已锁死目标时配图=零信息增益;②每步塞图会诱导模型处处依赖像素、过度锚定(红线③、MMSkills gated view-selection);③`verify` 是"进度里程碑",满地里程碑=没有里程碑,且过渡步常无干净判据(继承 P1"只写可核验"精神)。注意:存指针虽便宜,但 `bbox_norm` 要逐步判定、`cue` 要额外跑 VLM 生成,且过度锚定是"喂什么"的问题——故仍需按需。
-
-**step = 一步一动作(strain 1 → 方案 B)。** 一个 intent 若需多个动作(如"设 Heading 1"=开下拉+选项),保持"一步一动作"、让相邻步共享同一 intent(而非 action 塞一小串)。因为 `visual_anchor`/`verification` 本质是"针对某一个动作"的概念——一步一动作时绑定无歧义,且与将来"逐步消费"天然对齐、不用返工;代价仅 intent 少量重复。对照 LiteGUI:每条样本 = 一个原子 Action + 可跨步的 Subtask 标签。
+**每个 phase = 四件套**:
+- `trigger` — 这一阶段**开始时整屏的局面**(是"状态/情境",不是某个元素);
+- `action` — 这一阶段**一个粗动作**的自然语言(值用 `{slot}`),不是单次点击;
+- `visual_anchor` `{frame, object}` — **画了框的截图 + 对象描述**;可选(键盘/无明显目标的阶段没有);**无数字坐标**;
+- `verification` `{cue, frame}` — 成功判据(带 slot)+ 动作后的画框图;`bbox` 不出现在 JSON(变化区域框直接画在图上)。
 
 ---
 
-## 3. 文献出处
+## 3. 三条原则
 
-**skill schema 主参考**(字段与模态从这些工作取):
+- **① 升层**:phase 而非原子步——一个 phase = "要完成的一件事"(把同子目标的连续点击折进去)。典型 3–6 个 phase,而非 15–27 个点击。
+- **② 去坐标**:坐标只是"这一次的位置"、不可迁移;可复用的是"长啥样/是什么"。所以**用 bbox 把框画到截图上,JSON 只留 `{frame, object}`,不存数字坐标**。
+- **② 值 → slot**:任务专属的具体值(文件名/输入/搜索词)在 `action/trigger/verify_cue/object/description` 里**全部替换成 `{参数}`**(提示词 + 确定性后处理双保险)。
 
-| 简称 | arXiv | 借鉴到本 schema 的点 |
+---
+
+## 4. 为什么是 skill 不是 trajectory(5 要素 + 进度)
+
+skill = 从(多次)具体执行里抽象出的**不变、可复用能力**;trajectory = 某一次的记录。差别 = **抽象:从一个实例升到一类事**。参照 MMSkills(`2605.13527`),skill 靠 5 件事:
+
+| 要素 | 含义 | 我们(v3) |
 |---|---|---|
-| MMSkills | 2605.13527 | procedure + state cards(when/verify)+ 关键帧;"图是参照非坐标";gated view-selection |
-| Skill-DisCo | 2606.26669 | 字段最全对照(name/params/pre-post/…),做 checklist |
-| AWM | 2409.07429 | `value` 变量化 → 一条 skill 复用多任务 |
-| GUI-explorer | 2505.16827 | 元素 crop → 功能,视觉锚定到元素粒度 |
-| Vision-OPD | 2605.18740 | 红点/crop 式聚焦(anchor 当注意力引导,非模板) |
-| Skill-SD | 2604.10674 | `golden_workflow` / `mistake_analysis`(后者留给暂缓的 pitfalls) |
-| LiteGUI | 2605.07505 | 每步 `{Reason, Subtasks, Action}` → strain 1 的 B 方案对照 |
+| ① 抽象层级 | 停在子目标(相),不在原子点击 | ✅ 升层成 phase |
+| ② 去实例化 | 扔掉这一次的坐标/字面值 | ✅ 去坐标 + 值→slot |
+| ③ 适用性知识 | 何时用/何时别用(trigger、when_not) | ◻ 有 trigger/precondition,缺 when_not |
+| ④ 成败+失败知识 | 怎么算成 + 常见错法/恢复 | ◻ 有 verify,缺失败模式 |
+| ⑤ 多实例归纳 | 从同一能力的**多条轨迹**归纳 | ✗ 目前 1 轨迹 1 skill |
 
-**memory 结构调研(2025→2026.6,4 片)可迁移范式** —— 主要供将来 skill **bank**(第三层 links + 生命周期)取用,当前 schema 暂未启用:
-- 生命周期动词统一为 `写入→存储→检索→反思/巩固→遗忘/淘汰`(各家分型收敛)。
-- A-MEM(2502.12110):atomic note = `{content, keywords, tags, context, links}` + 链接演化 → 关联 skill 的字段模板。
-- SkillGraph(2605.12039):`prerequisite / enhancement / co-occurrence` 有向边 + 子图检索 → `links` 蓝本。
-- Mem0(2504.19413):入库前 `ADD/UPDATE/DELETE/NOOP` 去重门。
-- MemoryOS(2506.06326):`Heat = 使用+量+时近` 晋升/淘汰;MemoryBank:recall 强化。
-- MemOS(2507.03724):MemCube 的 `provenance + version` → 第三层 `provenance`。
+**根因**:①–④ 大多是 ⑤ 的结果——**真正的不变量必须多实例才有**;单轨迹只能"清洗+猜"。v3 解决了能从单轨迹做的 **①②**;**③④⑤ 留待"多轨迹归纳"那一轮**(③④ 可部分由强 LLM 补,⑤ 是根本一步)。
+
+---
+
+## 5. 关键决策 & 理由
+
+- **AgentNet 当"裸 traj"用**:真实 rollout 的底线只有**截图 + 执行动作**;AgentNet 的 `thought/reflection/分数/actual_task` 都是**事后 Claude 标注**(源码级证据见 OpenCUA `2508.09123`)。只取 image+code → 贴近真实、且"少→多"可扩展。
+- **为何要 ① enrich**:裸 rollout 没有语义;要 target/effect/框,得**扫前后帧现生成**(等价于 AgentNet 的标注层、PEEU 的 M3)。这是真实 rollout 场景的必备前置件。
+- **为何相位化(①)**:实测我们的原子步版 15–27 步、太像回放;MMSkills 的 skill 是 **3–6 个相**(trigger→action→verify),≈5× 凝练且是质变。
+- **为何画框存图、不存坐标(②)**:坐标是 instance-specific,复用会翻车;框画进图 = 视觉参照"操作这类东西",不泄露坐标。
+- **1 轨迹 1 skill(暂)**:多轨迹合并是 ⑤,更大工程,单独一轮。
+
+---
+
+## 6. 文献出处
+
+| 简称 | arXiv | 角色 |
+|---|---|---|
+| MMSkills | 2605.13527 | skill 结构主参考(procedure + state cards + keyframes);相位化/去坐标灵感 |
+| AWM | 2409.07429 | 值变量化(参数槽)|
+| Skill-SD | 2604.10674 | 轨迹→golden_workflow 的提炼 pipeline |
+| OpenCUA / AgentNet | 2508.09123 | 我们的 skill 源(Ubuntu 人类轨迹);其富字段=事后标注的源码级证据 |
+| OSWorld | 2404.07972 | 环境/评测(v1);轨迹容器格式同源 |
+| OSWorld 2.0 | 2606.29537 | 长程多应用工作流基准——skill 组合的舞台 |
