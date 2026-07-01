@@ -157,10 +157,12 @@ def _sanitize(name: str) -> str:
 
 
 def _to_int(v: Any) -> Any:
+    if isinstance(v, list) and len(v) == 1:
+        v = v[0]
     try:
         return int(v)
     except (TypeError, ValueError):
-        return v
+        return None  # unhashable/garbage -> a guaranteed enr_by_idx.get() miss, not a crash
 
 
 _BOX_ANCHOR = (255, 0, 0)
@@ -178,23 +180,38 @@ def _save_boxed(src_path: str, bbox: Optional[List[float]], dst_path: str,
     except (OSError, ValueError):
         return False
     if isinstance(bbox, list) and len(bbox) == 4:
-        w, h = im.size
-        pts = [bbox[0] * w, bbox[1] * h, (bbox[0] + bbox[2]) * w, (bbox[1] + bbox[3]) * h]
-        ImageDraw.Draw(im).rectangle(pts, outline=color, width=5)
-    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    im.save(dst_path)
+        try:
+            w, h = im.size
+            x0, y0 = bbox[0] * w, bbox[1] * h
+            x1, y1 = (bbox[0] + bbox[2]) * w, (bbox[1] + bbox[3]) * h
+            pts = [min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)]  # normalize inverted/degenerate box
+            ImageDraw.Draw(im).rectangle(pts, outline=color, width=5)
+        except (ValueError, TypeError):
+            pass  # degenerate box -> save the frame without the mark
+    try:
+        os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
+        im.save(dst_path)
+    except OSError:
+        return False
     return True
 
 
 def _apply_slots(text: Any, params: List[Dict[str, Any]]) -> Any:
-    """Replace each parameter's literal example value with its {name} slot (params pre-sorted longest-first)."""
+    """Replace each parameter's literal example value with its {name} slot in ONE simultaneous pass.
+
+    A single re.sub (alternation, longest example first) avoids re-scanning already-injected slots;
+    len>=3 guard cuts common short-word false hits.
+    """
     if not isinstance(text, str):
         return text
-    for p in params:
-        name, ex = p.get("name"), p.get("example")
-        if name and isinstance(ex, str) and len(ex) >= 2 and ex in text:
-            text = text.replace(ex, "{" + str(name) + "}")
-    return text
+    pairs = [(str(p["example"]), "{" + str(p["name"]) + "}")
+             for p in params
+             if p.get("name") and isinstance(p.get("example"), str) and len(p["example"]) >= 3]
+    if not pairs:
+        return text
+    pairs.sort(key=lambda t: len(t[0]), reverse=True)
+    repl = {ex: slot for ex, slot in pairs}
+    return re.sub("|".join(re.escape(ex) for ex, _ in pairs), lambda m: repl[m.group(0)], text)
 
 
 # ---------- adapter: AgentNet record -> minimal trajectory ----------
@@ -326,7 +343,7 @@ DISTILL_SYS = (
 
 def distill(task: str, enriched: List[Dict[str, Any]], cfg: T2SConfig) -> List[Dict[str, Any]]:
     """Text-only MLLM over task + enriched steps -> list of reusable skills (model decides count)."""
-    lines = [f"[step {e['index']}] verb={e['verb']} value={e['value']!r} | target: {e['target'][:120]} "
+    lines = [f"[step {e['index']}] verb={e['verb']} value={e['value'][:120]!r} | target: {e['target'][:120]} "
              f"| effect: {e['effect'][:120]}" for e in enriched]
     body = (f"TASK: {task}\n\nTRAJECTORY ({len(enriched)} steps):\n" + "\n".join(lines)
             + "\n\nExtract the reusable skill(s) as JSON.")
@@ -346,8 +363,8 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
     folder = os.path.join(out_dir, f"{seq:03d}_{name}")
     frames_dir = os.path.join(folder, "frames")
     params = [p for p in skill.get("parameters", []) if isinstance(p, dict)]
-    params.sort(key=lambda p: len(str(p.get("example", ""))), reverse=True)  # longest example first
     phases_out: List[Dict[str, Any]] = []
+    phase_sources: List[Any] = []
     for i, ph in enumerate(skill.get("phases", [])):
         pnum = i + 1
         phase: Dict[str, Any] = {
@@ -374,6 +391,7 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
         if ver.get("cue") or ver.get("frame"):
             phase["verification"] = ver
         phases_out.append(phase)
+        phase_sources.append(ph.get("source_steps"))
     if not phases_out:
         return False
     os.makedirs(folder, exist_ok=True)
@@ -384,8 +402,7 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
         "preconditions": [_apply_slots(str(p), params) for p in skill.get("preconditions", []) if isinstance(p, str)],
         "parameters": params,
         "phases": phases_out,
-        "provenance": {"dataset": "agentnet", "task_id": task_id,
-                       "phase_source_steps": [ph.get("source_steps") for ph in skill.get("phases", [])]},
+        "provenance": {"dataset": "agentnet", "task_id": task_id, "phase_source_steps": phase_sources},
     }
     with open(os.path.join(folder, "skill.json"), "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
