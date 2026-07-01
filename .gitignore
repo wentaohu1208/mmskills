@@ -9,3 +9,9 @@ __pycache__/
 # logs / tmp
 *.log
 tmp/
+
+# secrets (never commit)
+.env
+.env.*
+*.key
+*.pem
