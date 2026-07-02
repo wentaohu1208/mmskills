@@ -220,18 +220,13 @@ def build_task_config(task: Dict[str, Any], install_deps: bool) -> Dict[str, Any
 # reward.py prints "REWARD: <float>". run_bash_script is broken in the shipped VM image, so run reward.py
 # via the (working) python endpoint: exec its __main__ with stdout redirected to a VM file we pull back.
 _REWARD_OUT = "/home/user/_reward_out.txt"
+# reward.py needs the office libs installed into the guest's system python3, but run_python_script executes
+# in a DIFFERENT interpreter that lacks them -- so shell out to `python3 reward.py` (the guest python that
+# HAS the libs) and capture its output to a file we then pull back with get_file.
 _REWARD_DRIVER = (
-    "import io, contextlib, runpy\n"
-    "buf = io.StringIO()\n"
-    "try:\n"
-    "    with contextlib.redirect_stdout(buf):\n"
-    f"        runpy.run_path('/home/user/reward.py', run_name='__main__')\n"
-    "except SystemExit:\n"
-    "    pass\n"
-    "except Exception as _e:\n"
-    "    buf.write('RUNERR: ' + str(_e))\n"
-    f"with open('{_REWARD_OUT}', 'w') as _f:\n"
-    "    _f.write(buf.getvalue())\n"
+    "import subprocess\n"
+    "r = subprocess.run(['python3', 'reward.py'], cwd='/home/user', capture_output=True, text=True)\n"
+    f"open('{_REWARD_OUT}', 'w').write((r.stdout or '') + '\\n' + (r.stderr or ''))\n"
 )
 
 
