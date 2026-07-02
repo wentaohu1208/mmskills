@@ -13,16 +13,19 @@
 输入:最基本的 rollout traj(真实场景底线)
   task 指令  +  每步{ 截图 , 动作(verb, 归一化坐标, value) }
         │
- ① ENRICH  逐步 · MLLM + vision   ← 唯一用 vision 处
+ ① ENRICH      逐步 · MLLM + vision   ← 唯一用 vision 处
    看[前截图 + 后截图 + 动作] → 每步:target(语义) / effect(变了啥)
                                 / anchor_bbox(框目标) / change_bbox(变化区域,可空)
         │  enriched steps(把像素→文字 + 框)
- ② DISTILL 整条 · MLLM · 纯文本   ← 不看图
+ ② DISTILL     整条 · MLLM · 纯文本   ← 不看图
    读 task + enriched steps → 识别可复用 skill(自定几个)
-   把连续原子步「升层」成 3–6 个 phase;值→{slot};丢胶水步
+   把连续原子步「升层」成 3–6 个 phase;初步值→{slot};丢胶水步
+        │  skill 草稿(相位化,文本里可能还残留具体值)
+ ③ SLOT-VERIFY 逐 skill · MLLM · 纯文本 ← 语义去实例化(替代旧的确定性替换)
+   拿 parameters + 全部文本字段 → 把漏掉的字面值语义化替成 {slot}
+   (只替独立 token,绝不误伤 "desktop"/"formatting";失败回退原文)
         │
- write_skill:用 bbox 把框画到截图上存图(坐标画完即弃、不进 JSON);
-             值确定性替换成 {slot};一 skill 一文件夹
+ write_skill:用 bbox 把框画到截图上存图(坐标画完即弃、不进 JSON);一 skill 一文件夹
         │
 输出:一 skill 一文件夹
 ```
@@ -77,7 +80,7 @@ NNN_<name>/
 
 - **① 升层**:phase 而非原子步——一个 phase = "要完成的一件事"(把同子目标的连续点击折进去)。典型 3–6 个 phase,而非 15–27 个点击。
 - **② 去坐标**:坐标只是"这一次的位置"、不可迁移;可复用的是"长啥样/是什么"。所以**用 bbox 把框画到截图上,JSON 只留 `{frame, object}`,不存数字坐标**。
-- **② 值 → slot**:任务专属的具体值(文件名/输入/搜索词)在 `action/trigger/verify_cue/object/description` 里**全部替换成 `{参数}`**(提示词 + 确定性后处理双保险)。
+- **② 值 → slot**:任务专属的具体值(文件名/输入/搜索词)在 `action/trigger/verify_cue/object/description` 里**全部替换成 `{参数}`**(LLM 语义校验:slot_verify)。
 
 ---
 
