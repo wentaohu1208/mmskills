@@ -10,8 +10,8 @@ Per episode (one exploration = one trajectory):
   (2) GOAL    GPT-5.5 sees the first screen -> proposes ONE worthwhile coarse goal (a MOTIVATOR, not a
               success criterion)
   (3) ROLLOUT GPT-5.5 drives pyautogui toward the goal; record per step screenshot + action + thinking
-  (4) GATE    cheap checks (>=K real actions / non-blank / visual change) then a LIGHT MLLM judge:
-              "did this accomplish a coherent, non-trivial thing?" -- NOT a success judgement
+  (4) GATE    a single MLLM judge decides coherence by a POSITIVE, domain-general criterion -- did the run
+              cause a real, PERSISTENT change to content/structure/config? -- NOT a success judgement
   (5) LABEL   (coherent only) GPT-5.5 from first+last screen + actions -> the task actually accomplished
   (6) STORE   keep ALL episodes tagged (coherent + not); layout matches cua_gym_rollout / osworld_eval
 
@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import base64
 import glob
-import io
 import json
 import logging
 import os
@@ -41,12 +40,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from desktop_env.desktop_env import DesktopEnv
-
-try:
-    from PIL import Image, ImageChops
-    _HAS_PIL = True
-except ImportError:
-    _HAS_PIL = False
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -67,8 +60,6 @@ class ExploreConfig:
     seed_pool: str
     n_episodes: int
     max_steps: int
-    min_actions: int
-    min_frame_diff: float
     screen_w: int
     screen_h: int
     out_dir: str
@@ -193,38 +184,17 @@ def propose_goal(first_png: bytes, app: str, done_goals: List[str], cfg: Explore
 
 # ---------- (4) coherence gate ----------
 
-def _is_blank(png: bytes) -> bool:
-    if not _HAS_PIL:
-        return False
-    try:
-        im = Image.open(io.BytesIO(png)).convert("L").resize((32, 32))
-        mean = sum(im.getdata()) / 1024.0
-        return mean < 8 or mean > 248
-    except (OSError, ValueError):
-        return False
-
-
-def _frames_differ(a_png: bytes, b_png: bytes, thresh: float = 2.0) -> bool:
-    """True if two frames differ non-trivially. Without PIL, assume they differ (defer to the judge)."""
-    if not _HAS_PIL:
-        return True
-    try:
-        a = Image.open(io.BytesIO(a_png)).convert("L").resize((64, 64))
-        b = Image.open(io.BytesIO(b_png)).convert("L").resize((64, 64))
-        diff = ImageChops.difference(a, b)
-        return (sum(diff.getdata()) / 4096.0) > thresh
-    except (OSError, ValueError):
-        return True
-
-
 def coherence_judge(first_png: bytes, last_png: bytes, actions: List[str], cfg: ExploreConfig) -> Dict[str, Any]:
-    """LIGHT judge: did the run accomplish a coherent, non-trivial thing? (NOT a success judgement.)"""
+    """The sole coherence arbiter. Positive criterion (domain-general): did the run make a PERSISTENT change?"""
     act = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions)) or "(none)"
     system = (
         "You see the FIRST and LAST screen of an agent's short run on an Ubuntu app, plus its ACTION sequence. "
-        "Judge ONLY whether the run accomplished a COHERENT, NON-TRIVIAL thing -- i.e. it did some meaningful, "
-        "purposeful change (not aimless clicking, not just opening/closing a menu, not a stuck/no-op run). "
-        "This is NOT about matching any particular task; only about whether something real was accomplished. "
+        "Judge whether the run is COHERENT by ONE POSITIVE criterion: it caused a REAL, PERSISTENT change to the "
+        "document / application -- a change to CONTENT, STRUCTURE, or CONFIGURATION that would remain after "
+        "clicking elsewhere (e.g. data entered or transformed, a formula computed, formatting applied, an object "
+        "created, a setting changed, a file produced). If the final state shows such a persistent change, "
+        "coherent=true; otherwise coherent=false. This is NOT about matching any particular task -- only whether a "
+        "real, lasting change was made.\n"
         "Return ONLY JSON: {\"coherent\": true|false, \"reason\": \"<one sentence>\"}."
     )
     obj = _first_json(call_gpt([{"role": "system", "content": system},
@@ -238,13 +208,10 @@ def coherence_judge(first_png: bytes, last_png: bytes, actions: List[str], cfg: 
 
 def coherence_gate(steps: List[Dict[str, Any]], first_png: bytes, last_png: bytes,
                    cfg: ExploreConfig) -> Dict[str, Any]:
-    """Cheap checks first (free), then the light MLLM judge only if they pass."""
-    if len(steps) < cfg.min_actions:
-        return {"coherent": False, "reason": f"too_few_actions(<{cfg.min_actions})"}
-    if _is_blank(last_png):
-        return {"coherent": False, "reason": "blank_final_frame"}
-    if not _frames_differ(first_png, last_png, cfg.min_frame_diff):
-        return {"coherent": False, "reason": "no_visual_change"}
+    """Coherence is decided SOLELY by the judge (persistent-change criterion). Only a 0-action run -- nothing
+    to judge -- is short-circuited."""
+    if not steps:
+        return {"coherent": False, "reason": "no_actions"}
     return coherence_judge(first_png, last_png, [s["action"] for s in steps], cfg)
 
 
@@ -419,9 +386,6 @@ def main() -> None:
     parser.add_argument("--seed-pool", default="", help="dir of seed files (empty = explore a blank app)")
     parser.add_argument("--n-episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=20)
-    parser.add_argument("--min-actions", type=int, default=2, help="coherence gate: minimum real actions")
-    parser.add_argument("--min-frame-diff", type=float, default=2.0,
-                        help="coherence gate: min first->last 64x64 mean pixel diff to not be 'no change'")
     parser.add_argument("--provider", default="docker")
     parser.add_argument("--path-to-vm", default=None)
     parser.add_argument("--screen-width", type=int, default=1920)
@@ -437,12 +401,11 @@ def main() -> None:
         raise SystemExit("set OPENAI_BASE_URL and OPENAI_API_KEY in env")
 
     cfg = ExploreConfig(app=args.app, seed_pool=args.seed_pool, n_episodes=args.n_episodes,
-                        max_steps=args.max_steps, min_actions=args.min_actions,
-                        min_frame_diff=args.min_frame_diff,
+                        max_steps=args.max_steps,
                         screen_w=args.screen_width, screen_h=args.screen_height, out_dir=args.out_dir,
                         model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"), temperature=args.temperature)
     seeds = list_seeds(cfg)
-    logger.info("app=%s | seeds=%d | episodes=%d | PIL=%s", cfg.app, len(seeds), cfg.n_episodes, _HAS_PIL)
+    logger.info("app=%s | seeds=%d | episodes=%d", cfg.app, len(seeds), cfg.n_episodes)
 
     env = DesktopEnv(provider_name=args.provider, path_to_vm=args.path_to_vm, action_space="pyautogui",
                      screen_size=(args.screen_width, args.screen_height), headless=args.headless,
