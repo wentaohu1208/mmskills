@@ -68,6 +68,7 @@ class ExploreConfig:
     n_episodes: int
     max_steps: int
     min_actions: int
+    min_frame_diff: float
     screen_w: int
     screen_h: int
     out_dir: str
@@ -203,7 +204,7 @@ def _is_blank(png: bytes) -> bool:
         return False
 
 
-def _frames_differ(a_png: bytes, b_png: bytes, thresh: float = 6.0) -> bool:
+def _frames_differ(a_png: bytes, b_png: bytes, thresh: float = 2.0) -> bool:
     """True if two frames differ non-trivially. Without PIL, assume they differ (defer to the judge)."""
     if not _HAS_PIL:
         return True
@@ -242,7 +243,7 @@ def coherence_gate(steps: List[Dict[str, Any]], first_png: bytes, last_png: byte
         return {"coherent": False, "reason": f"too_few_actions(<{cfg.min_actions})"}
     if _is_blank(last_png):
         return {"coherent": False, "reason": "blank_final_frame"}
-    if not _frames_differ(first_png, last_png):
+    if not _frames_differ(first_png, last_png, cfg.min_frame_diff):
         return {"coherent": False, "reason": "no_visual_change"}
     return coherence_judge(first_png, last_png, [s["action"] for s in steps], cfg)
 
@@ -414,6 +415,8 @@ def main() -> None:
     parser.add_argument("--n-episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--min-actions", type=int, default=2, help="coherence gate: minimum real actions")
+    parser.add_argument("--min-frame-diff", type=float, default=2.0,
+                        help="coherence gate: min first->last 64x64 mean pixel diff to not be 'no change'")
     parser.add_argument("--provider", default="docker")
     parser.add_argument("--path-to-vm", default=None)
     parser.add_argument("--screen-width", type=int, default=1920)
@@ -430,6 +433,7 @@ def main() -> None:
 
     cfg = ExploreConfig(app=args.app, seed_pool=args.seed_pool, n_episodes=args.n_episodes,
                         max_steps=args.max_steps, min_actions=args.min_actions,
+                        min_frame_diff=args.min_frame_diff,
                         screen_w=args.screen_width, screen_h=args.screen_height, out_dir=args.out_dir,
                         model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"), temperature=args.temperature)
     seeds = list_seeds(cfg)
