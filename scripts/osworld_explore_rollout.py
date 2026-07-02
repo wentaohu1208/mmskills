@@ -35,7 +35,7 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -46,11 +46,16 @@ logger = logging.getLogger(__name__)
 
 ACTION_RE = re.compile(r"pyautogui\.[A-Za-z]+\([^\n;]*\)")
 _DANGER = ("os.", "import", "subprocess", "exec", "eval", "__")
-# how to open a seed file per app (the seed path is appended)
-_APP_OPEN: Dict[str, List[str]] = {
-    "libreoffice_calc": ["libreoffice", "--calc"],
-    "libreoffice_writer": ["libreoffice", "--writer"],
-    "libreoffice_impress": ["libreoffice", "--impress"],
+# per app: which seed file extensions to use (filters out stray cache files) + how to open a seed.
+#   open="office" -> OSWorld `open` (default app by extension, waits for load)
+#   open="gimp"   -> launch gimp on the image
+#   open="vscode" -> reset VS Code session (single-instance leaks state), then open the file in a trusted window
+_APP_SPEC: Dict[str, Dict[str, Any]] = {
+    "libreoffice_calc":    {"exts": (".xlsx", ".xls", ".ods", ".csv"), "open": "office", "launch": ["libreoffice", "--calc"]},
+    "libreoffice_writer":  {"exts": (".docx", ".doc", ".odt", ".rtf"), "open": "office", "launch": ["libreoffice", "--writer"]},
+    "libreoffice_impress": {"exts": (".pptx", ".ppt", ".odp"), "open": "office", "launch": ["libreoffice", "--impress"]},
+    "gimp":                {"exts": (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".gif", ".webp", ".xcf"), "open": "gimp"},
+    "vs_code":             {"exts": (".py", ".txt", ".md", ".js", ".ts", ".html", ".css", ".json"), "open": "vscode"},
 }
 
 
@@ -249,29 +254,52 @@ def reverse_label(first_png: bytes, last_png: bytes, actions: List[str], goal: s
 # ---------- (1) seed + root config ----------
 
 def list_seeds(cfg: ExploreConfig) -> List[str]:
-    """Files in the seed pool, sorted; empty list means explore a blank app."""
+    """Seed-pool files whose extension fits `app` (drops stray cache files); empty -> explore a blank app."""
     if not cfg.seed_pool or not os.path.isdir(cfg.seed_pool):
         return []
-    return sorted(p for p in glob.glob(os.path.join(cfg.seed_pool, "*")) if os.path.isfile(p))
+    exts = _APP_SPEC.get(cfg.app, {}).get("exts")
+    files = [p for p in sorted(glob.glob(os.path.join(cfg.seed_pool, "*"))) if os.path.isfile(p)]
+    out = [p for p in files if not exts or p.lower().endswith(exts)]
+    if len(out) < len(files):
+        logger.info("seed pool: kept %d/%d files matching %s", len(out), len(files), exts)
+    return out
 
 
 def build_root_config(app: str, seed_path: Optional[str]) -> Dict[str, Any]:
     """OSWorld task_config that opens the app on a seed file (or launches it blank); placeholder evaluator.
 
-    A seed is opened with OSWorld's `open` step (default app by extension, e.g. .xlsx -> Calc), which WAITS
-    for the file to open -- unlike fire-and-forget `launch` (which left the first screenshot on a bare
-    desktop, so the agent ignored the seed). Blank exploration falls back to `launch`.
+    Per-app open (see _APP_SPEC): office uses OSWorld's `open` (default app, WAITS for load); gimp/vscode use
+    `launch` + a settle `sleep` (fire-and-forget) with vscode's session reset. A missing/blank seed launches
+    the app empty.
     """
+    spec = _APP_SPEC.get(app, {})
+    mode = spec.get("open", "office")
     config: List[Dict[str, Any]] = []
+    vm_path: Optional[str] = None
     if seed_path:
-        name = os.path.basename(seed_path)
+        vm_path = f"/home/user/{os.path.basename(seed_path)}"
         config.append({"type": "upload_file", "parameters": {
-            "files": [{"local_path": os.path.abspath(seed_path), "path": f"/home/user/{name}"}]}})
-        config.append({"type": "open", "parameters": {"path": f"/home/user/{name}"}})
-    else:
-        launch = list(_APP_OPEN.get(app, []))
-        if launch:
-            config.append({"type": "launch", "parameters": {"command": launch}})
+            "files": [{"local_path": os.path.abspath(seed_path), "path": vm_path}]}})
+    if mode == "office":
+        if vm_path:
+            config.append({"type": "open", "parameters": {"path": vm_path}})
+        else:
+            config.append({"type": "launch", "parameters": {"command": spec.get("launch", ["libreoffice"])}})
+    elif mode == "gimp":
+        config.append({"type": "launch", "parameters": {"command": ["gimp"] + ([vm_path] if vm_path else [])}})
+        config.append({"type": "sleep", "parameters": {"seconds": 8}})  # gimp cold-start + image load
+    elif mode == "vscode":
+        # VS Code is single-instance and restores its last session -> state leaks across episodes. Kill it,
+        # disable restore, wipe restorable state, then open a fresh trusted window (on the seed if given).
+        reset = ("pkill -f /usr/share/code/code; sleep 1; mkdir -p /home/user/.config/Code/User; "
+                 "printf '{\\n  \"window.restoreWindows\": \"none\"\\n}\\n' > "
+                 "/home/user/.config/Code/User/settings.json; "
+                 "rm -rf /home/user/.config/Code/User/workspaceStorage /home/user/.config/Code/Backups")
+        launch = ["code", "--disable-workspace-trust", "--new-window"] + ([vm_path] if vm_path else [])
+        config.append({"type": "execute", "parameters": {"command": reset, "shell": True}})
+        config.append({"type": "launch", "parameters": {"command": launch}})
+        config.append({"type": "sleep", "parameters": {"seconds": 5}})  # let the window render before focusing
+        config.append({"type": "activate_window", "parameters": {"window_name": "Visual Studio Code"}})
     return {"id": f"explore-{app}", "instruction": f"explore {app}", "snapshot": app,
             "config": config, "related_apps": [app], "evaluator": {"func": "infeasible"}}
 
@@ -381,8 +409,8 @@ def run_episode(env: DesktopEnv, seed_path: Optional[str], cfg: ExploreConfig,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--app", required=True, choices=sorted(_APP_OPEN),
-                        help="app_type (must have a launch recipe in _APP_OPEN)")
+    parser.add_argument("--app", required=True, choices=sorted(_APP_SPEC),
+                        help="app_type (must have an open recipe in _APP_SPEC)")
     parser.add_argument("--seed-pool", default="", help="dir of seed files (empty = explore a blank app)")
     parser.add_argument("--n-episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=20)
@@ -393,41 +421,67 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--out-dir", default="explore_out")
+    parser.add_argument("--resume", action="store_true",
+                        help="skip episode indices already tagged in --out-dir (restart a killed batch)")
     args = parser.parse_args()
 
     if args.n_episodes < 1 or args.max_steps < 1:
         parser.error("--n-episodes and --max-steps must be >= 1")
-    if not os.environ.get("OPENAI_BASE_URL") or not os.environ.get("OPENAI_API_KEY"):
-        raise SystemExit("set OPENAI_BASE_URL and OPENAI_API_KEY in env")
 
     cfg = ExploreConfig(app=args.app, seed_pool=args.seed_pool, n_episodes=args.n_episodes,
                         max_steps=args.max_steps,
                         screen_w=args.screen_width, screen_h=args.screen_height, out_dir=args.out_dir,
                         model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"), temperature=args.temperature)
     seeds = list_seeds(cfg)
-    logger.info("app=%s | seeds=%d | episodes=%d", cfg.app, len(seeds), cfg.n_episodes)
+    logger.info("app=%s | seeds=%d | episodes=%d | resume=%s", cfg.app, len(seeds), cfg.n_episodes, args.resume)
 
-    env = DesktopEnv(provider_name=args.provider, path_to_vm=args.path_to_vm, action_space="pyautogui",
-                     screen_size=(args.screen_width, args.screen_height), headless=args.headless,
-                     os_type="Ubuntu", require_a11y_tree=False)
     done_goals: List[str] = []
     results: List[Dict[str, Any]] = []
-    try:
-        for i in range(cfg.n_episodes):
-            seed = seeds[i % len(seeds)] if seeds else None  # cycle the pool -> varied starting states
+    done_idx: Set[int] = set()
+    _RETRYABLE = ("exception", "bad_start", "no_goal")  # transient failures -> re-attempt on --resume
+    if args.resume:  # reload COMPLETED episodes so we skip them and keep the diversity history
+        for m in sorted(glob.glob(os.path.join(cfg.out_dir, cfg.app, "*", "meta.json"))):
+            name = os.path.basename(os.path.dirname(m))
+            if not (name.isdigit() and 0 <= int(name) < cfg.n_episodes):
+                continue  # stale / unrelated dir from an older or different run
             try:
-                meta = run_episode(env, seed, cfg, done_goals, i)
-                results.append(meta)
-                logger.info("[ep%d/%d] coherent=%s steps=%d task=%s", i + 1, cfg.n_episodes,
-                            meta["coherent"], meta["n_steps"], (meta["achieved_task"] or "-")[:60])
-            except Exception as e:  # backstop: run_episode already self-persists; catches any _finish failure  # noqa: BLE001
-                logger.error("episode %d failed hard: %s", i, e, exc_info=True)
-                results.append({"app": cfg.app, "seed_id": os.path.basename(seed) if seed else "none",
-                                "goal": "", "category": "", "coherent": False, "coherence_reason": "exception",
-                                "achieved_task": "", "faithful": False, "n_steps": 0,
-                                "end_reason": "exception", "dir": "", "error": str(e)})
-    finally:
-        env.close()
+                with open(m, encoding="utf-8") as fh:
+                    d = json.load(fh)
+            except (OSError, json.JSONDecodeError):
+                continue  # unparseable -> redo this episode
+            if d.get("end_reason") in _RETRYABLE:
+                continue  # transient failure -> redo (its dir is overwritten cleanly)
+            results.append(d)
+            if d.get("goal"):
+                done_goals.append(d["goal"])
+            done_idx.add(int(name))
+        logger.info("resume: %d completed episodes preloaded; retrying the rest", len(done_idx))
+
+    todo = [i for i in range(cfg.n_episodes) if i not in done_idx]
+    if todo and (not os.environ.get("OPENAI_BASE_URL") or not os.environ.get("OPENAI_API_KEY")):
+        raise SystemExit("set OPENAI_BASE_URL and OPENAI_API_KEY in env")
+    if todo:
+        env = DesktopEnv(provider_name=args.provider, path_to_vm=args.path_to_vm, action_space="pyautogui",
+                         screen_size=(args.screen_width, args.screen_height), headless=args.headless,
+                         os_type="Ubuntu", require_a11y_tree=False)
+        try:
+            for i in todo:
+                seed = seeds[i % len(seeds)] if seeds else None  # cycle the pool -> varied starting states
+                try:
+                    meta = run_episode(env, seed, cfg, done_goals, i)
+                    results.append(meta)
+                    logger.info("[ep%d/%d] coherent=%s steps=%d task=%s", i + 1, cfg.n_episodes,
+                                meta["coherent"], meta["n_steps"], (meta["achieved_task"] or "-")[:60])
+                except Exception as e:  # backstop: run_episode self-persists; catches any _finish failure  # noqa: BLE001
+                    logger.error("episode %d failed hard: %s", i, e, exc_info=True)
+                    results.append({"app": cfg.app, "seed_id": os.path.basename(seed) if seed else "none",
+                                    "goal": "", "category": "", "coherent": False, "coherence_reason": "exception",
+                                    "achieved_task": "", "faithful": False, "n_steps": 0,
+                                    "end_reason": "exception", "dir": "", "error": str(e)})
+        finally:
+            env.close()
+    else:
+        logger.info("nothing to do: all %d episodes already present", cfg.n_episodes)
 
     os.makedirs(cfg.out_dir, exist_ok=True)
     index = os.path.join(cfg.out_dir, f"{cfg.app}_episodes.jsonl")
