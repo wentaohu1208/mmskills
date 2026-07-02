@@ -174,9 +174,11 @@ def propose_goal(first_png: bytes, app: str, done_goals: List[str], cfg: Explore
         f"You see the first screen of the Ubuntu app '{app}'. Propose ONE concrete, worthwhile thing a user "
         "could accomplish here (an exploration goal): it must leave a real, persistent change to the "
         "document/content/settings, use the on-screen material, and be doable via the GUI in about 3-10 steps. "
-        "GOOD goals change state meaningfully (enter/transform data, apply formatting, create an object like a "
-        "chart/table/shape, configure a setting, run and verify a command). AVOID trivial goals (just opening/"
-        "closing a menu, pure navigation, a single click with no effect)." + diversity +
+        "If the screen ALREADY shows a document with content, prefer OPERATING ON that existing content "
+        "(sort/filter/format/chart/compute over the data that is there) rather than creating a new file from "
+        "scratch. GOOD goals change state meaningfully (enter/transform data, apply formatting, create an object "
+        "like a chart/table/shape, configure a setting, run and verify a command). AVOID trivial goals (just "
+        "opening/closing a menu, pure navigation, a single click with no effect)." + diversity +
         "\nReturn ONLY JSON: {\"goal\": \"...\", \"category\": \"<short tag, e.g. formatting/chart/formula>\"}."
     )
     obj = _first_json(call_gpt([{"role": "system", "content": system},
@@ -281,17 +283,22 @@ def list_seeds(cfg: ExploreConfig) -> List[str]:
 
 
 def build_root_config(app: str, seed_path: Optional[str]) -> Dict[str, Any]:
-    """OSWorld task_config: (upload seed +) launch the app; placeholder evaluator (we never call it)."""
-    launch = list(_APP_OPEN.get(app, []))
+    """OSWorld task_config that opens the app on a seed file (or launches it blank); placeholder evaluator.
+
+    A seed is opened with OSWorld's `open` step (default app by extension, e.g. .xlsx -> Calc), which WAITS
+    for the file to open -- unlike fire-and-forget `launch` (which left the first screenshot on a bare
+    desktop, so the agent ignored the seed). Blank exploration falls back to `launch`.
+    """
     config: List[Dict[str, Any]] = []
     if seed_path:
         name = os.path.basename(seed_path)
         config.append({"type": "upload_file", "parameters": {
             "files": [{"local_path": os.path.abspath(seed_path), "path": f"/home/user/{name}"}]}})
+        config.append({"type": "open", "parameters": {"path": f"/home/user/{name}"}})
+    else:
+        launch = list(_APP_OPEN.get(app, []))
         if launch:
-            launch = launch + [f"/home/user/{name}"]
-    if launch:
-        config.append({"type": "launch", "parameters": {"command": launch}})
+            config.append({"type": "launch", "parameters": {"command": launch}})
     return {"id": f"explore-{app}", "instruction": f"explore {app}", "snapshot": app,
             "config": config, "related_apps": [app], "evaluator": {"func": "infeasible"}}
 
