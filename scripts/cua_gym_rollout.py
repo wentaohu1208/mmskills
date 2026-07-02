@@ -209,24 +209,39 @@ def build_task_config(task: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- deterministic reward (run the task's reward.py inside the VM) ----------
 
+# reward.py prints "REWARD: <float>". run_bash_script is broken in the shipped VM image, so run reward.py
+# via the (working) python endpoint: exec its __main__ with stdout redirected to a VM file we pull back.
+_REWARD_OUT = "/home/user/_reward_out.txt"
+_REWARD_DRIVER = (
+    "import io, contextlib, runpy\n"
+    "buf = io.StringIO()\n"
+    "try:\n"
+    "    with contextlib.redirect_stdout(buf):\n"
+    f"        runpy.run_path('/home/user/reward.py', run_name='__main__')\n"
+    "except SystemExit:\n"
+    "    pass\n"
+    "except Exception as _e:\n"
+    "    buf.write('RUNERR: ' + str(_e))\n"
+    f"with open('{_REWARD_OUT}', 'w') as _f:\n"
+    "    _f.write(buf.getvalue())\n"
+)
+
+
 def score_task(env: DesktopEnv) -> Optional[float]:
-    """Run /home/user/reward.py in the VM and parse its 'REWARD: <float>' line. None if unavailable."""
+    """Run the task's reward.py inside the VM and parse its 'REWARD: <float>' line. None if unavailable."""
     try:
-        res = env.controller.run_bash_script("cd /home/user && python3 reward.py", timeout=120)
+        env.controller.run_python_script(_REWARD_DRIVER)
+        raw = env.controller.get_file(_REWARD_OUT)
     except Exception as e:  # scoring failure must not kill the batch  # noqa: BLE001
         logger.warning("reward.py run failed: %s", e)
         return None
-    if not isinstance(res, dict):
-        logger.warning("reward.py returned no result")
+    if not raw:
+        logger.warning("reward.py produced no output")
         return None
-    rc = res.get("returncode")
-    if rc not in (0, None):  # nonzero exit -> reward.py crashed; a stray 'REWARD:' in stderr is not a score
-        logger.warning("reward.py exited rc=%s: %s", rc, str(res.get("error") or "")[:200])
-        return None
-    out = res.get("output") or ""  # parse STDOUT only (reward.py prints its score there)
+    out = raw.decode("utf-8", "ignore")
     matches = _REWARD_RE.findall(out)
     if not matches:
-        logger.warning("no REWARD line in reward.py stdout (rc=%s): %s", rc, out.strip()[:200])
+        logger.warning("no REWARD line in reward.py output: %s", out.strip()[:200])
         return None
     return float(matches[-1])  # regex guarantees a float-parseable capture
 
