@@ -48,6 +48,9 @@ logger = logging.getLogger(__name__)
 ACTION_RE = re.compile(r"pyautogui\.[A-Za-z]+\([^\n;]*\)")
 _DANGER = ("os.", "import", "subprocess", "exec", "eval", "__")
 _REWARD_RE = re.compile(r"REWARD:\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)")
+# CUA-Gym initial_setup.py / reward.py read office files with these; the OSWorld qcow2 guest lacks them.
+# Installed per task for now (guest has internet); bake into the qcow2 to skip this at scale (--skip-vm-deps).
+_VM_METRIC_DEPS = "openpyxl python-docx python-pptx odfpy pandas pypdf"
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,7 @@ class RolloutConfig:
     out_dir: str
     model: str
     temperature: float
+    install_deps: bool
 
 
 # ---------- GPT-5.5 (vision) ----------
@@ -180,8 +184,9 @@ def _setup_files(task_dir: str) -> Tuple[List[Tuple[str, str]], Optional[Tuple[s
     return uploads, runner
 
 
-def build_task_config(task: Dict[str, Any]) -> Dict[str, Any]:
-    """OSWorld task_config that uploads the task's setup + reward files into the VM and runs setup.
+def build_task_config(task: Dict[str, Any], install_deps: bool) -> Dict[str, Any]:
+    """OSWorld task_config that (optionally) installs office libs, uploads the task's setup + reward
+    files into the VM, and runs setup.
 
     We do NOT use OSWorld's own evaluator here: scoring is done post-rollout by running the task's
     reward.py inside the VM (score_task). The placeholder evaluator keeps env.reset happy.
@@ -193,6 +198,9 @@ def build_task_config(task: Dict[str, Any]) -> Dict[str, Any]:
     if os.path.isfile(reward_path):
         files.append({"local_path": os.path.abspath(reward_path), "path": "/home/user/reward.py"})
     config: List[Dict[str, Any]] = []
+    if install_deps:  # office libs must exist BEFORE initial_setup.py (it too imports them)
+        config.append({"type": "execute", "parameters": {
+            "command": f"python3 -m pip install -q {_VM_METRIC_DEPS}", "shell": True}})
     if files:
         config.append({"type": "upload_file", "parameters": {"files": files}})
     if runner:
@@ -258,7 +266,7 @@ def run_task(env: DesktopEnv, task: Dict[str, Any], cfg: RolloutConfig) -> Dict[
     safe_id = re.sub(r"[^\w.-]", "_", str(task["id"]))  # never let a dataset id escape out_dir
     ep_dir = os.path.join(cfg.out_dir, str(task["app_type"]), safe_id)
     os.makedirs(ep_dir, exist_ok=True)
-    obs = env.reset(task_config=build_task_config(task))
+    obs = env.reset(task_config=build_task_config(task, cfg.install_deps))
     steps: List[Dict[str, Any]] = []
     history: List[str] = []
     end_reason = "max_steps"
@@ -326,6 +334,8 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--out-dir", default="rollouts")
+    parser.add_argument("--skip-vm-deps", action="store_true",
+                        help="skip installing office libs into the VM (use once they are baked into the qcow2)")
     args = parser.parse_args()
 
     if args.limit < 1 or args.max_steps < 1:
@@ -338,7 +348,7 @@ def main() -> None:
         apps=tuple(a.strip() for a in args.apps.split(",") if a.strip()) if args.apps else None,
         limit=args.limit, max_steps=args.max_steps, screen_w=args.screen_width, screen_h=args.screen_height,
         out_dir=args.out_dir, model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"),
-        temperature=args.temperature,
+        temperature=args.temperature, install_deps=not args.skip_vm_deps,
     )
     tasks = load_tasks(cfg)
     if not tasks:
