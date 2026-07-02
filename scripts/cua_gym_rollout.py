@@ -194,7 +194,7 @@ def build_task_config(task: Dict[str, Any]) -> Dict[str, Any]:
         files.append({"local_path": os.path.abspath(reward_path), "path": "/home/user/reward.py"})
     config: List[Dict[str, Any]] = []
     if files:
-        config.append({"type": "upload", "parameters": {"files": files}})
+        config.append({"type": "upload_file", "parameters": {"files": files}})
     if runner:
         cmd, name = runner
         # run in /home/user so relative-path setups land where reward.py (also cd'd there) looks for them
