@@ -5,7 +5,7 @@ the executed action (verb + normalized coords + value); IGNORE its rich human/mo
 annotations (thought, reflection, quality flags). This matches what a real agent
 rollout actually gives you, and makes it easy to feed richer fields later (few -> many).
 
-Two stages:
+Three stages:
   (1) ENRICH  per step, MLLM + vision (the ONLY vision stage). From [before frame,
       after frame, action] -> {target (semantic), effect, anchor_bbox (tight box on the
       target on the BEFORE frame; pointer actions only), change_bbox (changed region on
@@ -14,6 +14,9 @@ Two stages:
       -> reusable multimodal skill(s): the model decides how many, applies mild
       abstraction (values -> {parameters}), drops glue steps, sets per-step intent /
       needs_anchor / verification.
+  (3) SLOT-VERIFY  per skill, MLLM, TEXT-ONLY. Replace any leftover instance-specific
+      literal with its {parameter} slot SEMANTICALLY (no blind substring substitution, so
+      'desktop' is never mangled into 'desk{top}'). Replaces the old rule-based pass.
 
 Output: one FOLDER per skill -- <NNN>_<name>/skill.json + frames/ (full screenshots).
 All skill content is ENGLISH.
@@ -22,13 +25,17 @@ Endpoint from env: OPENAI_BASE_URL, OPENAI_API_KEY, OSWORLD_PROPOSER_MODEL (gpt-
 
 Run:
   python agentnet_traj2skill.py --in agentnet_ubuntu_5k.jsonl \
-      --img-dirs batch_imgs,test_imgs --out-dir outputs/agentnet_skills_v2 --limit 20
+      --img-dirs batch_imgs,test_imgs --out-dir outputs/agentnet_skills_v3 --limit 20
+  # repair existing skills in place (re-run only stage 3, no enrich/distill):
+  python agentnet_traj2skill.py --out-dir outputs/agentnet_skills_v3 --repair
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import copy
+import glob
 import json
 import logging
 import os
@@ -196,24 +203,6 @@ def _save_boxed(src_path: str, bbox: Optional[List[float]], dst_path: str,
     return True
 
 
-def _apply_slots(text: Any, params: List[Dict[str, Any]]) -> Any:
-    """Replace each parameter's literal example value with its {name} slot in ONE simultaneous pass.
-
-    A single re.sub (alternation, longest example first) avoids re-scanning already-injected slots;
-    len>=3 guard cuts common short-word false hits.
-    """
-    if not isinstance(text, str):
-        return text
-    pairs = [(str(p["example"]), "{" + str(p["name"]) + "}")
-             for p in params
-             if p.get("name") and isinstance(p.get("example"), str) and len(p["example"]) >= 3]
-    if not pairs:
-        return text
-    pairs.sort(key=lambda t: len(t[0]), reverse=True)
-    repl = {ex: slot for ex, slot in pairs}
-    return re.sub("|".join(re.escape(ex) for ex, _ in pairs), lambda m: repl[m.group(0)], text)
-
-
 # ---------- adapter: AgentNet record -> minimal trajectory ----------
 
 def find_images(img_dirs: Tuple[str, ...]) -> Dict[str, str]:
@@ -353,12 +342,104 @@ def distill(task: str, enriched: List[Dict[str, Any]], cfg: T2SConfig) -> List[D
     return [s for s in skills if isinstance(s, dict) and s.get("phases")]
 
 
+# ---------- (3) SLOT-VERIFY: LLM de-instantiation check (replaces rule-based substitution) ----------
+
+SLOT_VERIFY_SYS = (
+    "You de-instantiate a GUI skill so it reads generically. You are given the skill's `parameters` (each with a "
+    "name and an example value) and a JSON map of text fields (id -> text). Return the SAME map with every "
+    "leftover INSTANCE-SPECIFIC literal replaced by its matching {name} slot. RULES:\n"
+    "- Replace a value ONLY where it stands as a whole token. NEVER touch a substring inside a larger word: do "
+    "NOT turn 'desktop' into 'desk{slot}' when an example is 'top', nor 'formatting' into '{slot}ting' when an "
+    "example is 'format'.\n"
+    "- Change NOTHING else: keep wording, punctuation, spacing and any EXISTING {slots} identical. Do not "
+    "rephrase, translate, summarize, reorder, or add/remove ids.\n"
+    "- Only slot a value that is clearly the same instance-specific value a parameter stands for; leave generic "
+    "wording alone.\n"
+    'Return ONLY JSON with EXACTLY the same ids you were given: {"<id>":"<corrected text>", ...}.'
+)
+
+
+def _skill_text_fields(doc: Dict[str, Any]) -> Dict[str, str]:
+    """Collect the slot-bearing text fields of an assembled skill under stable ids."""
+    fields: Dict[str, str] = {}
+    if isinstance(doc.get("description"), str):
+        fields["description"] = doc["description"]
+    for i, p in enumerate(doc.get("preconditions", [])):
+        if isinstance(p, str):
+            fields[f"precondition.{i}"] = p
+    for i, ph in enumerate(doc.get("phases", [])):
+        if not isinstance(ph, dict):
+            continue
+        for key in ("trigger", "action"):
+            if isinstance(ph.get(key), str):
+                fields[f"phase.{i}.{key}"] = ph[key]
+        va = ph.get("visual_anchor")
+        if isinstance(va, dict) and isinstance(va.get("object"), str):
+            fields[f"phase.{i}.object"] = va["object"]
+        ver = ph.get("verification")
+        if isinstance(ver, dict) and isinstance(ver.get("cue"), str):
+            fields[f"phase.{i}.cue"] = ver["cue"]
+    return fields
+
+
+def _set_skill_text_fields(doc: Dict[str, Any], fields: Dict[str, str]) -> None:
+    """Write corrected text back into the skill dict by id (only ids we produced)."""
+    for fid, txt in fields.items():
+        if not isinstance(txt, str):
+            continue
+        parts = fid.split(".")
+        if fid == "description":
+            doc["description"] = txt
+        elif parts[0] == "precondition":
+            idx = int(parts[1])
+            if idx < len(doc.get("preconditions", [])):
+                doc["preconditions"][idx] = txt
+        elif parts[0] == "phase":
+            idx, sub = int(parts[1]), parts[2]
+            phs = doc.get("phases", [])
+            if idx >= len(phs):
+                continue
+            ph = phs[idx]
+            if sub in ("trigger", "action"):
+                ph[sub] = txt
+            elif sub == "object" and isinstance(ph.get("visual_anchor"), dict):
+                ph["visual_anchor"]["object"] = txt
+            elif sub == "cue" and isinstance(ph.get("verification"), dict):
+                ph["verification"]["cue"] = txt
+
+
+def slot_verify(doc: Dict[str, Any], cfg: T2SConfig) -> Dict[str, Any]:
+    """LLM pass replacing any leftover literal value with its {slot}, semantically (no substring hits).
+
+    Replaces the old rule-based substitution. Returns a corrected COPY; on any failure returns `doc` unchanged.
+    """
+    params = [p for p in doc.get("parameters", []) if isinstance(p, dict) and p.get("name")]
+    fields = _skill_text_fields(doc)
+    if not params or not fields:
+        return doc
+    plist = "\n".join(f"- {{{p['name']}}}  example: {p.get('example', '')!r}" for p in params)
+    body = ("PARAMETERS:\n" + plist + "\n\nTEXT FIELDS (id -> text):\n"
+            + json.dumps(fields, ensure_ascii=False, indent=2) + "\n\nReturn the corrected map as JSON.")
+    try:
+        obj = _extract_json(call_gpt([{"role": "system", "content": SLOT_VERIFY_SYS},
+                                      {"role": "user", "content": body}], cfg))
+    except RuntimeError as e:
+        logger.warning("slot_verify failed, keeping draft: %s", e)
+        return doc
+    if not isinstance(obj, dict):
+        return doc
+    out = copy.deepcopy(doc)
+    _set_skill_text_fields(out, {k: v for k, v in obj.items() if k in fields})
+    return out
+
+
 # ---------- assemble + write one skill folder ----------
 
 def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], img_index: Dict[str, str],
-                out_dir: str, seq: int, task_id: str) -> bool:
+                out_dir: str, seq: int, task_id: str, cfg: T2SConfig) -> bool:
     """Assemble one distilled skill (phases) into <seq>_<name>/{skill.json, frames/}, drawing the anchor /
-    change boxes onto the saved screenshots (no numeric coordinates in the JSON). Returns True if written."""
+    change boxes onto the saved screenshots (no numeric coordinates in the JSON). Text keeps the distiller's
+    raw wording; a final `slot_verify` LLM pass replaces any leftover literal with its {slot}. Returns True."""
     name = _sanitize(str(skill.get("name", "skill")))
     folder = os.path.join(out_dir, f"{seq:03d}_{name}")
     frames_dir = os.path.join(folder, "frames")
@@ -369,8 +450,8 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
         pnum = i + 1
         phase: Dict[str, Any] = {
             "name": _sanitize(str(ph.get("name", f"phase{pnum}"))),
-            "trigger": _apply_slots(str(ph.get("trigger", "")), params),
-            "action": _apply_slots(str(ph.get("action", "")), params),
+            "trigger": str(ph.get("trigger", "")),
+            "action": str(ph.get("action", "")),
         }
         # anchor: draw the box onto the phase's representative before-frame; store no coordinate
         ea = enr_by_idx.get(_to_int(ph.get("anchor_step")))
@@ -378,11 +459,10 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
             fn = f"phase{pnum}_anchor.png"
             if _save_boxed(img_index[ea["before_image"]], ea["anchor_bbox"],
                            os.path.join(frames_dir, fn), _BOX_ANCHOR):
-                phase["visual_anchor"] = {"frame": f"frames/{fn}",
-                                          "object": _apply_slots(str(ea.get("target", "")), params)}
+                phase["visual_anchor"] = {"frame": f"frames/{fn}", "object": str(ea.get("target", ""))}
         # verification: cue + the phase's after-frame (change region boxed if localized)
         ev = enr_by_idx.get(_to_int(ph.get("verify_step")))
-        ver: Dict[str, Any] = {"cue": _apply_slots(str(ph.get("verify_cue", "")), params)}
+        ver: Dict[str, Any] = {"cue": str(ph.get("verify_cue", ""))}
         if ev and ev.get("after_image") and ev["after_image"] in img_index:
             fn = f"phase{pnum}_after.png"
             if _save_boxed(img_index[ev["after_image"]], ev.get("change_bbox"),
@@ -397,30 +477,66 @@ def write_skill(skill: Dict[str, Any], enr_by_idx: Dict[Any, Dict[str, Any]], im
     os.makedirs(folder, exist_ok=True)
     doc = {
         "name": name,
-        "description": _apply_slots(str(skill.get("description", "")), params),
+        "description": str(skill.get("description", "")),
         "domain": str(skill.get("domain", "")),
-        "preconditions": [_apply_slots(str(p), params) for p in skill.get("preconditions", []) if isinstance(p, str)],
+        "preconditions": [str(p) for p in skill.get("preconditions", []) if isinstance(p, str)],
         "parameters": params,
         "phases": phases_out,
         "provenance": {"dataset": "agentnet", "task_id": task_id, "phase_source_steps": phase_sources},
     }
+    doc = slot_verify(doc, cfg)  # (3) LLM de-instantiation: leftover literals -> {slots}
     with open(os.path.join(folder, "skill.json"), "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)
     return True
 
 
+def _repair_existing(cfg: T2SConfig) -> None:
+    """Re-run slot_verify over every existing skill.json under cfg.out_dir (no enrich/distill).
+
+    Each file is handled independently (one failure skips only that file) and rewritten ATOMICALLY
+    (tmp + os.replace), so a mid-write error can never truncate a previously-good skill.json. Files that
+    slot_verify leaves unchanged are not touched at all.
+    """
+    skill_files = sorted(glob.glob(os.path.join(cfg.out_dir, "*", "skill.json")))
+    n = 0
+    for sf in skill_files:
+        try:
+            with open(sf, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            fixed = slot_verify(doc, cfg)
+            if fixed is doc:  # unchanged (no params/fields, API fail, or non-dict reply) -> keep file as-is
+                continue
+            tmp = sf + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(fixed, fh, ensure_ascii=False, indent=2)
+            os.replace(tmp, sf)  # atomic swap: a failed dump can't leave the original truncated
+            n += 1
+            logger.info("[repair] %s", os.path.basename(os.path.dirname(sf)))
+        except Exception as e:  # one bad file must not abort the repair batch
+            logger.error("skip %s: %s", sf, e)
+            continue
+    logger.info("slot_verify repaired %d skills in %s", n, cfg.out_dir)
+
+
 def main() -> None:
-    """CLI: enrich + distill selected AgentNet trajectories into per-skill folders."""
+    """CLI: enrich + distill + slot-verify AgentNet trajectories into per-skill folders.
+
+    With --repair, skip enrich/distill and only re-run slot_verify (stage 3) over existing skill.json.
+    """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--in", dest="in_path", required=True, help="AgentNet ubuntu jsonl")
+    parser.add_argument("--in", dest="in_path", default="", help="AgentNet ubuntu jsonl (required unless --repair)")
     parser.add_argument("--img-dirs", default="batch_imgs,test_imgs", help="comma-separated screenshot dirs")
     parser.add_argument("--out-dir", required=True, help="output dir (one folder per skill)")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--min-alignment", type=int, default=8)
     parser.add_argument("--temperature", type=float, default=0.4)
     parser.add_argument("--require-images", action="store_true", help="only trajectories with all frames present")
+    parser.add_argument("--repair", action="store_true",
+                        help="re-run slot_verify over existing skill.json in --out-dir (no enrich/distill)")
     args = parser.parse_args()
 
+    if not args.repair and not args.in_path:
+        parser.error("--in is required unless --repair")
     if args.limit < 1:
         parser.error("--limit must be >= 1")
     if not os.environ.get("OPENAI_BASE_URL") or not os.environ.get("OPENAI_API_KEY"):
@@ -431,6 +547,10 @@ def main() -> None:
                     out_dir=args.out_dir, model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"),
                     temperature=args.temperature, limit=args.limit, min_alignment=args.min_alignment,
                     require_images=args.require_images)
+
+    if args.repair:
+        _repair_existing(cfg)
+        return
 
     img_index = find_images(cfg.img_dirs)
     logger.info("indexed %d screenshots from %s", len(img_index), list(cfg.img_dirs))
@@ -449,7 +569,7 @@ def main() -> None:
             enr_by_idx = {e["index"]: e for e in enriched}
             written = 0
             for sk in skills:
-                if write_skill(sk, enr_by_idx, img_index, cfg.out_dir, nskills + 1, tj["task_id"]):
+                if write_skill(sk, enr_by_idx, img_index, cfg.out_dir, nskills + 1, tj["task_id"], cfg):
                     nskills += 1
                     written += 1
         except Exception as e:  # one trajectory must not kill the batch
