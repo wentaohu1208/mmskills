@@ -256,13 +256,18 @@ def reverse_label(first_png: bytes, last_png: bytes, actions: List[str], goal: s
     act = "\n".join(f"{i + 1}. {a}" for i, a in enumerate(actions)) or "(none)"
     system = (
         "You are given the FIRST and LAST screen of an agent's run on an Ubuntu app, plus its ACTION sequence. "
-        "Describe the TASK this run ACTUALLY ACCOMPLISHED -- judge ONLY from the visible before->after change and "
-        "the actions; do not assume more than happened. The agent may have done less (or other) than intended -- "
-        "describe what it REALLY achieved, with the concrete values it used (filenames, inputs, choices). Write it "
-        "as ONE clear instruction a user could give to reproduce this outcome.\n"
-        f"(Hint -- the agent was aiming for: '{goal}'. Use only as a hint; label by the actual result.)\n"
-        "Return ONLY JSON: {\"achieved_task\": \"...\", \"faithful\": true|false} "
-        "(faithful=false if before->after shows no coherent accomplishment)."
+        "Write the TASK this run accomplished as ONE concise, high-level instruction a user would give.\n"
+        "Phrase it as REQUIREMENTS / constraints -- WHAT the result must satisfy (the goal), NOT how it was done. "
+        "INCLUDE the content/structure/values the outcome has (e.g. 'a Net Sales column equal to Sales minus "
+        "Returns minus Discounts', 'rows sorted by the June column in descending order'). EXCLUDE all operational "
+        "HOW: which app was opened, which menu/tool/button was used, how cells or ranges were selected, "
+        "click/type/save mechanics, cell coordinates -- those belong to the STEPS, not the task.\n"
+        "Judge ONLY from the visible before->after change and the actions; do not assume more than happened. "
+        "Include ONLY requirements the final state ACTUALLY satisfies; OMIT anything left unfinished or abandoned "
+        "(do not mention partial/incomplete attempts at all).\n"
+        f"(Hint -- the agent aimed for: '{goal}'. Use only as a hint; describe the actual satisfied result.)\n"
+        "Return ONLY JSON: {\"achieved_task\": \"<one concise constraint-style instruction>\", "
+        "\"faithful\": true|false} (faithful=false if nothing coherent was actually accomplished)."
     )
     obj = _first_json(call_gpt([{"role": "system", "content": system},
                                 {"role": "user", "content": [
