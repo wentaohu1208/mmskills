@@ -21,7 +21,8 @@ Endpoint (OpenAI-compatible, vision) from env: OPENAI_BASE_URL, OPENAI_API_KEY, 
 
 Run (needs a live OSWorld VM):
   python osworld_explore_rollout.py --app libreoffice_calc --seed-pool seeds/calc \
-      --n-episodes 20 --max-steps 20 --provider docker --out-dir explore_calc
+      --n-episodes 20 --max-steps 20 --provider docker --out-dir explore_calc --concurrency 6
+  # --concurrency K runs K episodes at once, each in its own docker VM (K=1 = serial). --resume recovers crashes.
 """
 
 from __future__ import annotations
@@ -32,7 +33,9 @@ import glob
 import json
 import logging
 import os
+import queue
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -407,6 +410,67 @@ def run_episode(env: DesktopEnv, seed_path: Optional[str], cfg: ExploreConfig,
         return _finish(ep_dir, meta, steps)
 
 
+def _explore_worker(wid: int, todo_q: "queue.Queue[int]", seeds: List[Optional[str]], cfg: ExploreConfig,
+                    done_goals: List[str], results: List[Dict[str, Any]], lock: threading.Lock,
+                    env_kwargs: Dict[str, Any], propagate_fatal: bool = False) -> None:
+    """One worker owns ONE DesktopEnv (its own docker VM) and drains the shared episode queue.
+
+    Episodes are independent, so N workers give ~N x throughput. `env.close()` is guaranteed in `finally`, so a
+    worker that dies mid-run never leaks its (constructed) container. Shared state: CPython list append/read is
+    atomic, so `done_goals` (diversity hint, read+appended inside run_episode) and `results` never corrupt; the
+    lock only keeps each `results.append` + its log line together.
+
+    Known, accepted limits: (a) the diversity hint is WEAKER under concurrency -- episodes running at the same
+    time cannot see each other's not-yet-generated goals (no lock can fix this; the goal does not exist yet).
+    (b) if `DesktopEnv.__init__` raises AFTER allocating a container but before returning, `env` stays None and
+    cannot be closed here -- that leak is the provider constructor's responsibility.
+    """
+    if wid:
+        time.sleep(wid * 2.0)  # smooth the boot burst; NOT a port-collision guard (the provider FileLock is that)
+    env: Optional[DesktopEnv] = None
+    try:
+        env = DesktopEnv(**env_kwargs)
+    except Exception:  # this worker has no VM -> it can do nothing  # noqa: BLE001
+        logger.error("[w%d] env construction failed", wid, exc_info=True)
+        if propagate_fatal:  # K=1 inline path: crash loudly like the old serial code (don't silently do nothing)
+            raise
+        return
+    _DEAD = ("exception", "bad_start", "bad_obs")  # end_reasons that signal the VM itself is unhealthy
+    dead_streak = 0
+    try:
+        while True:
+            try:
+                i = todo_q.get_nowait()
+            except queue.Empty:
+                break
+            seed = seeds[i % len(seeds)] if seeds else None  # cycle the pool -> varied starting states
+            try:
+                meta = run_episode(env, seed, cfg, done_goals, i)
+            except Exception as e:  # backstop: run_episode self-persists; never let a worker die on one episode  # noqa: BLE001
+                logger.error("[w%d] episode %d failed hard: %s", wid, i, e, exc_info=True)
+                meta = {"app": cfg.app, "seed_id": os.path.basename(seed) if seed else "none",
+                        "goal": "", "category": "", "coherent": False, "coherence_reason": "exception",
+                        "achieved_task": "", "faithful": False, "n_steps": 0,
+                        "end_reason": "exception", "dir": "", "error": str(e)}
+            with lock:
+                results.append(meta)
+                logger.info("[w%d ep%d/%d] coherent=%s steps=%d task=%s", wid, i + 1, cfg.n_episodes,
+                            meta.get("coherent"), meta.get("n_steps"), (meta.get("achieved_task") or "-")[:60])
+            if meta.get("end_reason") in _DEAD:  # a dead VM fails every episode -> stop hogging the shared queue
+                dead_streak += 1
+                if dead_streak >= 3:
+                    logger.error("[w%d] env looks dead after %d consecutive failures; leaving the rest to healthy "
+                                 "workers (--resume recovers)", wid, dead_streak)
+                    break
+            else:
+                dead_streak = 0
+    finally:
+        try:
+            env.close()
+        except Exception as e:  # closing a dead container must not crash shutdown  # noqa: BLE001
+            logger.warning("[w%d] env.close failed: %s", wid, e)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True, choices=sorted(_APP_SPEC),
@@ -423,10 +487,14 @@ def main() -> None:
     parser.add_argument("--out-dir", default="explore_out")
     parser.add_argument("--resume", action="store_true",
                         help="skip episode indices already tagged in --out-dir (restart a killed batch)")
+    parser.add_argument("--concurrency", type=int, default=1,
+                        help="parallel worker VMs, each its own docker container (1 = serial)")
     args = parser.parse_args()
 
     if args.n_episodes < 1 or args.max_steps < 1:
         parser.error("--n-episodes and --max-steps must be >= 1")
+    if args.concurrency < 1:
+        parser.error("--concurrency must be >= 1")
 
     cfg = ExploreConfig(app=args.app, seed_pool=args.seed_pool, n_episodes=args.n_episodes,
                         max_steps=args.max_steps,
@@ -461,32 +529,36 @@ def main() -> None:
     if todo and (not os.environ.get("OPENAI_BASE_URL") or not os.environ.get("OPENAI_API_KEY")):
         raise SystemExit("set OPENAI_BASE_URL and OPENAI_API_KEY in env")
     if todo:
-        env = DesktopEnv(provider_name=args.provider, path_to_vm=args.path_to_vm, action_space="pyautogui",
-                         screen_size=(args.screen_width, args.screen_height), headless=args.headless,
-                         os_type="Ubuntu", require_a11y_tree=False)
-        try:
-            for i in todo:
-                seed = seeds[i % len(seeds)] if seeds else None  # cycle the pool -> varied starting states
-                try:
-                    meta = run_episode(env, seed, cfg, done_goals, i)
-                    results.append(meta)
-                    logger.info("[ep%d/%d] coherent=%s steps=%d task=%s", i + 1, cfg.n_episodes,
-                                meta["coherent"], meta["n_steps"], (meta["achieved_task"] or "-")[:60])
-                except Exception as e:  # backstop: run_episode self-persists; catches any _finish failure  # noqa: BLE001
-                    logger.error("episode %d failed hard: %s", i, e, exc_info=True)
-                    results.append({"app": cfg.app, "seed_id": os.path.basename(seed) if seed else "none",
-                                    "goal": "", "category": "", "coherent": False, "coherence_reason": "exception",
-                                    "achieved_task": "", "faithful": False, "n_steps": 0,
-                                    "end_reason": "exception", "dir": "", "error": str(e)})
-        finally:
-            env.close()
+        env_kwargs: Dict[str, Any] = dict(
+            provider_name=args.provider, path_to_vm=args.path_to_vm, action_space="pyautogui",
+            screen_size=(args.screen_width, args.screen_height), headless=args.headless,
+            os_type="Ubuntu", require_a11y_tree=False)
+        n_workers = max(1, min(args.concurrency, len(todo)))  # never spawn more workers than episodes
+        todo_q: "queue.Queue[int]" = queue.Queue()
+        for i in todo:
+            todo_q.put(i)
+        lock = threading.Lock()
+        logger.info("running %d episodes over %d worker VM(s)", len(todo), n_workers)
+        if n_workers == 1:  # serial: run inline (no threads) -> behaviourally equivalent to the old single-VM path
+            _explore_worker(0, todo_q, seeds, cfg, done_goals, results, lock, env_kwargs, propagate_fatal=True)
+        else:
+            threads = [threading.Thread(
+                target=_explore_worker, name=f"explore-w{w}",
+                args=(w, todo_q, seeds, cfg, done_goals, results, lock, env_kwargs)) for w in range(n_workers)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        left = todo_q.qsize()
+        if left:  # workers stopped early (dead VMs) -> some episodes never ran
+            logger.error("%d episode(s) left unprocessed (worker VMs failed); re-run with --resume to finish", left)
     else:
         logger.info("nothing to do: all %d episodes already present", cfg.n_episodes)
 
     os.makedirs(cfg.out_dir, exist_ok=True)
     index = os.path.join(cfg.out_dir, f"{cfg.app}_episodes.jsonl")
-    with open(index, "w", encoding="utf-8") as fh:
-        for r in results:
+    with open(index, "w", encoding="utf-8") as fh:  # concurrency appends by completion time -> sort for a stable index
+        for r in sorted(results, key=lambda r: r.get("dir", "")):
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
     n_coh = sum(1 for r in results if r.get("coherent"))
     logger.info("done: %d episodes | coherent=%d -> %s", len(results), n_coh, index)
