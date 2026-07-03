@@ -15,3 +15,6 @@ tmp/
 .env.*
 *.key
 *.pem
+
+# outputs (data artifacts)
+outputs/
