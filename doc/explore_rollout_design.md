@@ -29,7 +29,7 @@
 ① 起始      从种子池抽一份种子 → 上传进 VM → 按 app 打开                → 活 VM + 首屏(带这份数据)
    │        office=open(等文件加载)/ gimp=launch gimp <图>+sleep / vscode=会话重置+开文件
    ▼
-② 提目标    GPT-5.5 看首屏(可选:代入 persona;已探目标促多样;已有内容优先操作它) → {goal, category}   ← 发动机,非成败标准
+② 提目标    GPT-5.5 看首屏(已探目标促多样;已有内容优先操作它)         → {goal, category}   ← 发动机,非成败标准
    │
    ▼
 ③ Rollout   循环:截图→GPT-5.5{thought,action}→env.step                 → 每步{index,thought,action,截图}
@@ -50,7 +50,7 @@
 | 阶段 | 输入 | 输出 | 谁干 |
 |---|---|---|---|
 | ① 起始 | app + 种子 | 活 VM + 首屏 | DesktopEnv + 按 app 打开 |
-| ② 提目标 | 首屏 + app(+可选 persona +已探目标) | `{goal, category}` | GPT-5.5 |
+| ② 提目标 | 首屏 + app(+已探目标) | `{goal, category}` | GPT-5.5 |
 | ③ Rollout | goal + 活 VM | 每步 `{index,thought,action,img}` + `end_reason` | GPT-5.5 + env |
 | ④ 连贯门 | 首/末屏 + 动作序列 | `{coherent, reason}` | GPT-5.5 判官(唯一) |
 | ⑤ 反推 | 首屏+末屏+动作(+goal hint) | `{achieved_task, faithful}` | GPT-5.5 |
@@ -66,11 +66,11 @@
 <app>/<NNN>/
   step_00_before.png … final.png
   traj.jsonl     每步 {index, thought, action, img_before}
-  meta.json      {app, seed_id, persona, goal, category, coherent, coherence_reason,
+  meta.json      {app, seed_id, goal, category, coherent, coherence_reason,
                   achieved_task, faithful, n_steps, end_reason, dir}
 ```
 
-- `achieved_task` / `category` 是**一等字段**(未来分簇 / 多实例归纳用);`seed_id` / `persona` 记来自哪份种子 / 哪个用户画像。
+- `achieved_task` / `category` 是**一等字段**(未来分簇 / 多实例归纳用);`seed_id` 记来自哪份种子。
 - **keep-all-tagged**:coherent 与 incoherent 都存;失败/异常 episode 也经统一出口写 meta(不留无标签的孤儿目录)。
 
 ---
@@ -81,7 +81,6 @@
 - **⑤ 反推 = 约束(要什么),不含操作(怎么做)** —— 任务只写"结果需满足的约束"(如"Net Sales 列 = Sales−Returns−Discounts"),**排除**"打开文件/用名称框选区/点 Data 菜单/敲公式"这些操作(那是步骤的事)。**只写真正满足的约束,略去半途而废的部分**(既不吹牛也不叙述半成品)→ 仍忠实(任务是轨迹做成之事的子集),且是一句高层、用户口吻的指令(对齐 OS-Genesis 高层意图 / NNetnav 一句式惯例)。
 - **反推器做薄** —— 只输出一句 achieved_task;**参数化 / 起名 / 相位化全交给 traj2skill 的 ② distill**,不重复造轮子。
 - **种子:用 `open`(等加载)+ 种子池多样化** —— `launch` 不等,首屏会停在空桌面 → agent 无视种子;`open` 会等文件打开。一个 domain 的轨迹不该全来自一张表,故每 episode 从池里换一份不同种子;**种子多样 ↔ 未来 N→1 归纳**(同一能力 × 不同数据的多实例)天然协同。
-- **② persona × 种子 → 多样但接地的 goal(opt-in)** —— 种子决定屏上**有什么材料**(可行、不悬空),persona 决定**谁在看、想拿它干嘛**(同一张表:会计 / 老师 / 小店主想做的事完全不同),goal 从两者交集长出。**只作用于 ② 提目标一处**(prompt 加"代入 persona;不自然就别硬套"),④ 连贯门 / ⑤ 反推**完全不见 persona**——它是纯上游多样性旋钮。`--persona-pool` 为空 = 老 v1 行为(纯增量)。persona 源用 **Persona Hub**(`2406.20094`)轻过滤子集;思路承 **AgentSynth**(`2506.14205`,persona 播任务)/ **NNetnav**(`2410.02907`,persona 播探索),但我们独有 **persona × 真实种子** 的"多样 × 接地"组合。
 - **收集与合成彻底解耦** —— 探索器**只产轨迹库,绝不写 skill**。"1 轨→1 skill"还是"N 轨→1 skill"住在下游合成阶段;探索器换合成方式一个字不用改。
 
 ---
@@ -90,8 +89,6 @@
 
 **② 提目标**:
 ```
-{可选 persona 前缀:你在扮演用户画像 "{persona}"。在它合理适用于屏上内容处代入其偏好;
- 若不自然,就退回对内容做一件合理的事——别硬套。}
 你看到 Ubuntu app '{app}' 的首屏。提出 ONE 个用户在这里"值得做成"的具体事(探索目标)——
 要求:会留下真实、持久的改动(文档内容/对象/设置),用到屏幕上实际存在的材料,GUI 上约 3–10 步能做完。
 若屏幕已显示带内容的文档,优先"操作已有内容"(排序/筛选/格式/做图/计算),而不是从零新建文件。
@@ -127,7 +124,6 @@
 |---|---|---|
 | `--app` | 5 选 1:libreoffice_calc / _writer / _impress / gimp / vs_code | 各有 open recipe(`_APP_SPEC`) |
 | `--seed-pool` | `seeds/<app>/`(源自 OSWorld cache) | 按扩展名过滤杂项;每 episode 换一份 |
-| `--persona-pool` | 空(=无 persona,纯 v1) | 一行一个 persona(Persona Hub 子集,行长截 200);每 episode 取一个(错相步长,避免 persona 序号恒等于种子序号);池大小尽量与种子池互质以增组合覆盖 |
 | `--n-episodes` | 20/app | 一 episode = 一次完整探索 = 一条轨迹 |
 | `--max-steps` | 30 | 贴近真人一条任务长度;给粗目标留冗余 |
 | `--resume` | off | 跳过已完成 episode(失败的 exception/bad_start/no_goal 会重试),长跑断点续跑 |

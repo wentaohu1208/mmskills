@@ -8,8 +8,7 @@ happen?" gate. Design: doc/explore_rollout_design.md.
 Per episode (one exploration = one trajectory):
   (1) SEED    reset the VM, upload a seed file from the pool, open the app on it (varied seeds -> varied tasks)
   (2) GOAL    GPT-5.5 sees the first screen -> proposes ONE worthwhile coarse goal (a MOTIVATOR, not a
-              success criterion); optionally role-played as a sampled PERSONA to diversify intent over
-              the same seed content (persona x seed -> grounded-but-diverse goals)
+              success criterion)
   (3) ROLLOUT GPT-5.5 drives pyautogui toward the goal; record per step screenshot + action + thinking
   (4) GATE    a single MLLM judge decides coherence by a POSITIVE, domain-general criterion -- did the run
               cause a real, PERSISTENT change to content/structure/config? -- NOT a success judgement
@@ -22,8 +21,7 @@ Endpoint (OpenAI-compatible, vision) from env: OPENAI_BASE_URL, OPENAI_API_KEY, 
 
 Run (needs a live OSWorld VM):
   python osworld_explore_rollout.py --app libreoffice_calc --seed-pool seeds/calc \
-      --persona-pool personas.txt --n-episodes 20 --max-steps 20 --provider docker --out-dir explore_calc
-  # --persona-pool is optional; omit it to reproduce the persona-free v1 behaviour exactly.
+      --n-episodes 20 --max-steps 20 --provider docker --out-dir explore_calc
 """
 
 from __future__ import annotations
@@ -65,7 +63,6 @@ _APP_SPEC: Dict[str, Dict[str, Any]] = {
 class ExploreConfig:
     app: str
     seed_pool: str
-    persona_pool: str
     n_episodes: int
     max_steps: int
     screen_w: int
@@ -167,16 +164,10 @@ def next_action(goal: str, app: str, png: bytes, history: List[str], cfg: Explor
 
 # ---------- (2) propose goal ----------
 
-def propose_goal(first_png: bytes, app: str, done_goals: List[str], cfg: ExploreConfig,
-                 persona: str = "") -> Dict[str, str]:
+def propose_goal(first_png: bytes, app: str, done_goals: List[str], cfg: ExploreConfig) -> Dict[str, str]:
     recent = "; ".join(done_goals[-15:])
     diversity = (f"\nPick something DIFFERENT from these already-explored goals: {recent}." if recent else "")
-    role = (  # persona is an upstream DIVERSITY knob only; coherence gate + reverse-label never see it
-        f"You are role-playing this user persona: \"{persona}\". Adopt this persona's priorities WHERE they "
-        "plausibly fit the content on screen; if the persona does not naturally fit, fall back to a sensible "
-        "task on the content -- do NOT force a weird fit. " if persona else "")
     system = (
-        role +
         f"You see the first screen of the Ubuntu app '{app}'. Propose ONE concrete, worthwhile thing a user "
         "could accomplish here (an exploration goal): it must leave a real, persistent change to the "
         "document/content/settings, use the on-screen material, and be doable via the GUI in about 3-10 steps. "
@@ -274,23 +265,6 @@ def list_seeds(cfg: ExploreConfig) -> List[str]:
     return out
 
 
-def load_personas(cfg: ExploreConfig) -> List[str]:
-    """Persona-pool lines (one persona per line, length-capped); empty/missing pool -> [] (goal stays persona-free)."""
-    if not cfg.persona_pool:
-        return []
-    if not os.path.isfile(cfg.persona_pool):  # explicit opt-in flag -> a bad path should not fail silently
-        logger.warning("persona pool not found (%s); proceeding persona-free", cfg.persona_pool)
-        return []
-    try:
-        with open(cfg.persona_pool, encoding="utf-8") as fh:
-            personas = [ln.strip()[:200] for ln in fh if ln.strip()]  # cap length: bound the injection surface
-    except (OSError, UnicodeDecodeError) as e:  # UnicodeDecodeError is a ValueError, NOT an OSError
-        logger.warning("persona pool unreadable (%s); proceeding persona-free: %s", cfg.persona_pool, e)
-        return []
-    logger.info("persona pool: loaded %d personas from %s", len(personas), cfg.persona_pool)
-    return personas
-
-
 def build_root_config(app: str, seed_path: Optional[str]) -> Dict[str, Any]:
     """OSWorld task_config that opens the app on a seed file (or launches it blank); placeholder evaluator.
 
@@ -349,7 +323,7 @@ def _finish(ep_dir: str, meta: Dict[str, Any], steps: List[Dict[str, Any]]) -> D
 
 
 def run_episode(env: DesktopEnv, seed_path: Optional[str], cfg: ExploreConfig,
-                done_goals: List[str], ep_idx: int, persona: str = "") -> Dict[str, Any]:
+                done_goals: List[str], ep_idx: int) -> Dict[str, Any]:
     """One exploration: seed -> goal -> rollout -> gate -> (reverse label). ALWAYS stored + tagged.
 
     The whole body is wrapped, so a failure at any point still leaves a tagged episode dir on disk
@@ -358,7 +332,7 @@ def run_episode(env: DesktopEnv, seed_path: Optional[str], cfg: ExploreConfig,
     seed_id = os.path.basename(seed_path) if seed_path else "none"
     ep_dir = os.path.join(cfg.out_dir, cfg.app, f"{ep_idx:03d}")
     os.makedirs(ep_dir, exist_ok=True)
-    meta: Dict[str, Any] = {"app": cfg.app, "seed_id": seed_id, "persona": persona, "goal": "", "category": "",
+    meta: Dict[str, Any] = {"app": cfg.app, "seed_id": seed_id, "goal": "", "category": "",
                             "coherent": False, "coherence_reason": "", "achieved_task": "",
                             "faithful": False, "n_steps": 0, "end_reason": "", "dir": ep_dir}
     steps: List[Dict[str, Any]] = []
@@ -369,7 +343,7 @@ def run_episode(env: DesktopEnv, seed_path: Optional[str], cfg: ExploreConfig,
             meta["end_reason"] = meta["coherence_reason"] = "bad_start"
             return _finish(ep_dir, meta, steps)
 
-        goal_obj = propose_goal(first_png, cfg.app, done_goals, cfg, persona)
+        goal_obj = propose_goal(first_png, cfg.app, done_goals, cfg)
         meta["goal"], meta["category"] = goal_obj["goal"], goal_obj["category"]
         if not meta["goal"]:
             logger.warning("[ep%d] propose_goal returned empty goal", ep_idx)
@@ -438,8 +412,6 @@ def main() -> None:
     parser.add_argument("--app", required=True, choices=sorted(_APP_SPEC),
                         help="app_type (must have an open recipe in _APP_SPEC)")
     parser.add_argument("--seed-pool", default="", help="dir of seed files (empty = explore a blank app)")
-    parser.add_argument("--persona-pool", default="",
-                        help="file of user personas, one per line (empty = no persona; goal proposal unchanged)")
     parser.add_argument("--n-episodes", type=int, default=20)
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--provider", default="docker")
@@ -456,14 +428,12 @@ def main() -> None:
     if args.n_episodes < 1 or args.max_steps < 1:
         parser.error("--n-episodes and --max-steps must be >= 1")
 
-    cfg = ExploreConfig(app=args.app, seed_pool=args.seed_pool, persona_pool=args.persona_pool,
-                        n_episodes=args.n_episodes, max_steps=args.max_steps,
+    cfg = ExploreConfig(app=args.app, seed_pool=args.seed_pool, n_episodes=args.n_episodes,
+                        max_steps=args.max_steps,
                         screen_w=args.screen_width, screen_h=args.screen_height, out_dir=args.out_dir,
                         model=os.environ.get("OSWORLD_PROPOSER_MODEL", "gpt-5.5"), temperature=args.temperature)
     seeds = list_seeds(cfg)
-    personas = load_personas(cfg)
-    logger.info("app=%s | seeds=%d | personas=%d | episodes=%d | resume=%s",
-                cfg.app, len(seeds), len(personas), cfg.n_episodes, args.resume)
+    logger.info("app=%s | seeds=%d | episodes=%d | resume=%s", cfg.app, len(seeds), cfg.n_episodes, args.resume)
 
     done_goals: List[str] = []
     results: List[Dict[str, Any]] = []
@@ -497,18 +467,17 @@ def main() -> None:
         try:
             for i in todo:
                 seed = seeds[i % len(seeds)] if seeds else None  # cycle the pool -> varied starting states
-                persona = personas[(i * 7) % len(personas)] if personas else ""  # stride: avoid persona index == seed index lock
                 try:
-                    meta = run_episode(env, seed, cfg, done_goals, i, persona)
+                    meta = run_episode(env, seed, cfg, done_goals, i)
                     results.append(meta)
                     logger.info("[ep%d/%d] coherent=%s steps=%d task=%s", i + 1, cfg.n_episodes,
                                 meta["coherent"], meta["n_steps"], (meta["achieved_task"] or "-")[:60])
                 except Exception as e:  # backstop: run_episode self-persists; catches any _finish failure  # noqa: BLE001
                     logger.error("episode %d failed hard: %s", i, e, exc_info=True)
                     results.append({"app": cfg.app, "seed_id": os.path.basename(seed) if seed else "none",
-                                    "persona": persona, "goal": "", "category": "", "coherent": False,
-                                    "coherence_reason": "exception", "achieved_task": "", "faithful": False,
-                                    "n_steps": 0, "end_reason": "exception", "dir": "", "error": str(e)})
+                                    "goal": "", "category": "", "coherent": False, "coherence_reason": "exception",
+                                    "achieved_task": "", "faithful": False, "n_steps": 0,
+                                    "end_reason": "exception", "dir": "", "error": str(e)})
         finally:
             env.close()
     else:
