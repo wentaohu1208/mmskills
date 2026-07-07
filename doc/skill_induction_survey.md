@@ -139,3 +139,5 @@ skill-RL/技能库方向 22 篇的核心教训:**"库怎么长大"人人做,"怎
 > **总计 90+ 篇**(六组去重后)。待核 venue:ASI(COLM'25?)、Learn-by-Interact(ICML'25?)、Agent S/S2 会议为报告值;MMSkills/VisualSkill/HyMEM/MementoGUI/SkillGraph 等 2026 新作正式引用前再核 DOI。"CIL" 用户所指未定:LOTUS `2311.02058`(最可能)/ 备选 IsCiL `2410.22658`、SPECI `2504.15561`(待确认)。skill-RL 5 篇的结构化深读另见 memory `reference_agent_skill_rl_survey`。
 >
 > **补充参考**:RESOURCE2SKILL `2606.29538`(人写多模态资源→可执行技能 Wiki;一源一 skill、**不跨轨归纳**,与我们互补)—— 独立印证本文两条主张:**留真实帧+按需加载视觉**(视频源消融 −9.2 / 视觉模态 +1.9)、**BM25+LM 层级检索 > dense(+8.9)**,可作 §3/§4/Phase 3 的旁证。
+>
+> **同路工程产品**:Skill-Omni(openJiuwen / JiuwenSwarm)——《让 Skill "有图可依":openJiuwen 首发多模态 Skill 范式 Skill-Omni》 https://www.qbitai.com/2026/07/445229.html(网页/视频教程 → 多模态 skill,去噪留"前后对比图"+ 按需读取;与 RESOURCE2SKILL 同路:**一源一 skill、不跨轨归纳**,引 MMSkills/VisualSkill 血统)。
